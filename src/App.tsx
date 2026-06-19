@@ -171,6 +171,10 @@ export default function App() {
   const [summary, setSummary] = useState('');
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [activeTab, setActiveTab] = useState<'transcript' | 'summary'>('transcript');
+  
+  // Manual text fallback & voice error states
+  const [manualInputText, setManualInputText] = useState('');
+  const [speechErrorDetected, setSpeechErrorDetected] = useState<string | null>(null);
 
   const defaultAiRef = useRef<any>(null);
   const translationIdRef = useRef(0);
@@ -427,6 +431,7 @@ export default function App() {
       recognition.onstart = () => {
         isActualRecordingRef.current = true;
         setIsRecording(true);
+        setSpeechErrorDetected(null);
       };
 
       recognition.onresult = (event: any) => {
@@ -462,12 +467,13 @@ export default function App() {
         }
 
         console.error('Speech recognition error', event.error);
+        setSpeechErrorDetected(event.error);
         if (event.error === 'not-allowed') {
-          addToast('未獲得麥克風權限，請檢查瀏覽器安全性設定。');
+          addToast('未獲得麥克風權限，請檢查瀏覽器安全性設定，或直接在下方手動鍵盤輸入唷！');
         } else if (event.error === 'network') {
-          addToast('網路連線不穩定，語音辨識已中斷。');
+          addToast('網路連線不穩定/語音伺服器連線受限，語音辨識已中斷。推薦使用下方「手動鍵盤輸入門」進行完美比對與翻譯！');
         } else if (event.error !== 'no-speech') {
-          addToast(`錄音發生錯誤：${event.error}`);
+          addToast(`錄音發生錯誤：${event.error}。推薦使用下方手動鍵盤輸入唷！`);
         }
         setIsRecording(false);
         isActualRecordingRef.current = false;
@@ -485,7 +491,7 @@ export default function App() {
 
   const toggleRecording = () => {
     if (!recognitionRef.current) {
-      addToast('您的瀏覽器不支援語音辨識功能。');
+      addToast('您的瀏覽器不支援語音辨識功能。推薦使用下方的「手動鍵盤輸入」！');
       return;
     }
 
@@ -498,6 +504,7 @@ export default function App() {
     } else {
       try {
         setError(null);
+        setSpeechErrorDetected(null);
         recognitionRef.current.start();
       } catch (err) {
         // Ignore "already started" error if it somehow still happens
@@ -508,9 +515,41 @@ export default function App() {
           return;
         }
         console.error('Start recognition error:', err);
+        setSpeechErrorDetected('start-failed');
         setIsRecording(false);
         isActualRecordingRef.current = false;
+        addToast('麥克風啟動失敗，請至下方手動輸入欄進行法醫比對與翻譯。');
       }
+    }
+  };
+
+  const submitManualText = async () => {
+    const text = manualInputText.trim();
+    if (!text) {
+      addToast('請輸入要翻譯與分析的英文文本。', 'info');
+      return;
+    }
+
+    setIsTranslating(true);
+    const segmentId = Math.random().toString(36).substring(7);
+    const newEntry = {
+      id: segmentId,
+      original: text,
+      timestamp: Date.now()
+    };
+    
+    // Add to history list immediately
+    setHistory(prev => [newEntry, ...prev]);
+    setManualInputText(''); // clear input
+
+    try {
+      await translateSegment(text, segmentId);
+      addToast('手動段落翻譯與口音特徵比對完成！', 'success');
+    } catch (err) {
+      console.error('Manual translate error:', err);
+      addToast('翻譯或分析發生意外錯誤。', 'error');
+    } finally {
+      setIsTranslating(false);
     }
   };
 
@@ -691,6 +730,54 @@ export default function App() {
                   <span>開啟麥克風 開始錄音</span>
                 </>
               )}
+            </button>
+          </div>
+
+          {/* Fallback & Manual Text Input Portal */}
+          <div className="bg-white border border-zinc-200/80 rounded-3xl p-5 shadow-sm space-y-3 shrink-0">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-[10px] text-zinc-400 font-mono">FALLBACK / MANUAL INPUT</p>
+                <p className="text-xs font-bold text-zinc-700 flex items-center gap-1.5 mt-1">
+                  <FileText className="w-4 h-4 text-zinc-500" />
+                  手動輸入比對翻譯
+                </p>
+              </div>
+              <span className="text-[9px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 font-bold border border-indigo-100">
+                100% 穩定自適應
+              </span>
+            </div>
+
+            {speechErrorDetected && (
+              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-800 leading-relaxed">
+                💡 <strong>系統提示：</strong> 偵測到您的瀏覽器或沙盒 iframe 限制了線上語音連線 (Web Speech API 狀態: {speechErrorDetected === 'network' ? '網路/線上伺服器連線中斷' : `錯誤狀態: ${speechErrorDetected}`})。別擔心！您可以直接在下方輸入框鍵盤輸入、或複製貼上任何英文對白段落，AI 特徵比對、自適應大綱與精準翻譯依然 here and 100% 完美運作唷！
+              </div>
+            )}
+
+            <div className="relative">
+              <textarea
+                placeholder="在此貼上或鍵盤手動輸入英文段落，例如: 'We are learning about New Zealand economic history today...'，並點擊下方按鈕以啟動法醫級口音比對分析與翻譯..."
+                value={manualInputText}
+                onChange={(e) => setManualInputText(e.target.value)}
+                disabled={isTranslating}
+                className="w-full h-24 p-3 bg-zinc-50 border border-zinc-200 rounded-2xl text-xs outline-none focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 transition-all resize-none shadow-inner text-zinc-700 placeholder:text-zinc-400"
+              />
+            </div>
+
+            <button
+              onClick={submitManualText}
+              disabled={isTranslating || !manualInputText.trim()}
+              className={cn(
+                "w-full py-3 px-4 rounded-xl transition-all font-bold text-xs flex items-center justify-center gap-2 border shadow-sm",
+                !manualInputText.trim() 
+                  ? "bg-zinc-100 border-zinc-200 text-zinc-400 cursor-not-allowed" 
+                  : isTranslating 
+                  ? "bg-indigo-50 border-indigo-200 text-indigo-700 cursor-wait" 
+                  : "bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200 hover:border-indigo-300"
+              )}
+            >
+              <Sparkles className={cn("w-4 h-4", isTranslating && "animate-spin")} />
+              <span>{isTranslating ? "正在精準翻譯與口音特徵比對中..." : "送出文本進行分析"}</span>
             </button>
           </div>
 
