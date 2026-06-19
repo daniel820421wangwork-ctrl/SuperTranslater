@@ -196,11 +196,11 @@ export default function App() {
   // Multi-Provider AI Settings
   const [aiSettings, setAiSettings] = useState<AISettings>(() => {
     try {
-      const saved = localStorage.getItem('swift_transcript_ai_settings');
+      const saved = localStorage.getItem('swift_transcript_ai_settings_v2');
       if (saved) {
         const parsed = JSON.parse(saved);
         return {
-          provider: parsed.provider || 'gemini',
+          provider: parsed.provider || 'openai',
           geminiModel: parsed.geminiModel || 'gemini-3.5-flash',
           openaiModel: parsed.openaiModel || 'gpt-4o-mini',
           claudeModel: parsed.claudeModel || 'claude-3-5-sonnet-latest',
@@ -213,7 +213,7 @@ export default function App() {
       console.error('Error parsing saved settings, resetting.', e);
     }
     return {
-      provider: 'gemini',
+      provider: 'openai',
       geminiModel: 'gemini-3.5-flash',
       openaiModel: 'gpt-4o-mini',
       claudeModel: 'claude-3-5-sonnet-latest',
@@ -258,7 +258,7 @@ export default function App() {
 
   // Backup settings to localStorage
   useEffect(() => {
-    localStorage.setItem('swift_transcript_ai_settings', JSON.stringify(aiSettings));
+    localStorage.setItem('swift_transcript_ai_settings_v2', JSON.stringify(aiSettings));
   }, [aiSettings]);
 
   const getGeminiClient = useCallback((customKey?: string) => {
