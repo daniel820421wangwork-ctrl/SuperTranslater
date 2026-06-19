@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   Languages, Copy, Check, Info, Zap, Trash2, 
   ArrowRightLeft, Mic, MicOff, XCircle, StopCircle, 
-  FileText, X, Sparkles, ListChecks, Sliders, Settings, Key, Globe 
+  FileText, X, Sparkles, ListChecks, Sliders, Settings, Key, Globe, Brain, RefreshCw
 } from 'lucide-react';
 import { cn } from './lib/utils';
 
@@ -16,6 +16,15 @@ const LANGUAGES = [
   { code: 'en-AU', label: '澳洲英文', flag: '🇦🇺' },
   { code: 'en-CA', label: '加拿大英文', flag: '🇨🇦' },
   { code: 'en-IN', label: '印度英文', flag: '🇮🇳' },
+];
+
+// Predefined context templates
+const CONTEXT_PRESETS = [
+  { id: 'nz-econ', icon: '🎓', label: '經濟學課', text: '紐西蘭教授開設的經濟學大綱，重點在自由市場、凱因斯理論與紐澳貿易往來，包含特定紐澳母音縮讀與在地縮寫。' },
+  { id: 'tech-dev', icon: '💻', label: '軟體開發', text: '跨國軟體技術工程敏捷研討會，包含高併發架構、Microservices、CI/CD 雲端部署，英美口音混合。' },
+  { id: 'biz-coop', icon: '💼', label: '商業談判', text: '亞太區商業外包合作談判，討論合約法律條款、智慧財產權與季度 NDA 約定。' },
+  { id: 'casual-cafe', icon: '☕', label: '咖啡口語', text: '紐約咖啡廳的日常生活口語交談，充滿美式連讀、口語化俚語與點餐常用縮略詞。' },
+  { id: 'ind-service', icon: '📞', label: '技術客服', text: '印度客服中心對接技術支援，討論資料庫重構、伺服器伺服端口溢出與重啟除錯等特有的專有術語。' }
 ];
 
 // Available models per provider
@@ -155,6 +164,7 @@ export default function App() {
   const [detectedAccent, setDetectedAccent] = useState<{code: string, label: string, reason: string, wordCount: number, traits: string[], confidence: number} | null>(null);
   const [toasts, setToasts] = useState<{id: string, message: string, type: 'error' | 'success' | 'info'}[]>([]);
   const [sessionContext, setSessionContext] = useState('');
+  const [isExtractingContext, setIsExtractingContext] = useState(false);
   const [isFullViewOpen, setIsFullViewOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'speech' | 'ai'>('speech');
@@ -191,6 +201,70 @@ export default function App() {
       setToasts(prev => prev.filter(t => t.id !== id));
     }, 5000);
   }, []);
+
+  const autoExtractContextFromHistory = async () => {
+    if (history.length === 0) {
+      addToast('目前尚未錄音，無法進行自適應歸納！請先開啟麥克風說幾句話。', 'info');
+      return;
+    }
+
+    setIsExtractingContext(true);
+    addToast('正在分析對話記錄、重塑適合當前對話的大綱與背景...', 'info');
+
+    try {
+      const fullText = [...history].reverse().map(h => `英文原文: "${h.original}" -> 中文翻譯: "${h.translated || ''}"`).join('\n');
+      const systemInstruction = "You are an advanced bilingual AI specialize in classifying and summarizing educational/business conversation contexts to perfect translations.";
+      const prompt = `請根據以下錄音對話的『中英文逐字稿』記錄，客觀且深度地分析並歸納出：
+        1. 本次會議或課程的核心「大綱與情境背景」
+        2. 主要探討的「學術/研究/產業範疇或特定主題」
+        3. 發言者（如教授或講者）可能擁有的語意特色或學科專有名詞
+        
+        請將上述分析精確提煉、重塑為一段直接、精簡的「課堂大綱與背景描述（限 120 字以內）」。這段描述將填入當前 Session Context 背景記憶，供後續大語言模型即時進行更逼真、口音自適應與術語精確的中英翻譯。
+        
+        注意：請直接輸出這段高質量的繁體中文（台灣）摘要描述，不要包含任何「好的」、「以下是」等開場白或 JSON 標籤。
+        
+        當前逐字稿內容：
+        ${fullText}`;
+
+      let textResult = '';
+
+      if (aiSettings.provider === 'openai') {
+        if (!aiSettings.openaiKey) {
+          throw new Error('您選擇了 OpenAI 引擎，但尚未設定 API 金鑰，請點擊右上角「設定」配置。');
+        }
+        textResult = await callOpenAI(aiSettings.openaiKey, aiSettings.openaiModel, prompt, systemInstruction);
+      } else if (aiSettings.provider === 'claude') {
+        if (!aiSettings.claudeKey) {
+          throw new Error('您選擇了 Claude 引擎，但尚未設定 API 金鑰，請點擊右上角「設定」配置。');
+        }
+        textResult = await callClaude(aiSettings.claudeKey, aiSettings.claudeModel, prompt, systemInstruction);
+      } else {
+        // Gemini
+        const client = getGeminiClient(aiSettings.geminiKey);
+        const response = await client.models.generateContent({
+          model: aiSettings.geminiModel,
+          contents: prompt,
+          config: {
+            systemInstruction: systemInstruction,
+          }
+        });
+        textResult = response.text || '';
+      }
+
+      const cleanText = textResult.trim();
+      if (cleanText) {
+        setSessionContext(cleanText);
+        addToast('🧠 課堂主題大綱記憶已成功自適應更新！', 'success');
+      } else {
+        throw new Error('AI 回傳了空的歸納結果');
+      }
+    } catch (err) {
+      console.error('自適應背景歸納錯誤:', err);
+      addToast(err instanceof Error ? `歸納失敗: ${err.message}` : '背景自適應歸納失敗，請重試。', 'error');
+    } finally {
+      setIsExtractingContext(false);
+    }
+  };
 
   const generateSummary = async () => {
     if (history.length === 0) {
@@ -882,7 +956,7 @@ export default function App() {
                     <div>
                       <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
                         <Zap className="w-3.5 h-3.5 text-indigo-500" />
-                        課堂大綱與背景主題 (Session Context)
+                        課堂大綱與背景主題 (Session Context Memory)
                       </label>
                       <textarea
                         placeholder="例如：紐西蘭教授開設的經濟學、軟體開發敏捷會議、日常咖啡廳對話..."
@@ -890,9 +964,32 @@ export default function App() {
                         onChange={(e) => setSessionContext(e.target.value)}
                         className="w-full h-24 p-3 bg-zinc-50/50 border border-zinc-200 rounded-2xl text-xs outline-none focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 transition-all resize-none shadow-inner"
                       />
-                      <p className="text-[10px] text-zinc-400 leading-normal mt-1.5">
-                        💡 貼心提醒：輸入「紐西蘭經濟學課程」，AI 能在翻譯時主動聯想教授可能來自紐西蘭，並對口音中的語音（例如 kiwi 語調、特定的短母音、經濟專業術語）具有超凡的校正精準度！
-                      </p>
+                      
+                      {/* Presets Selection */}
+                      <div className="mt-3">
+                        <span className="block text-[10px] font-bold text-zinc-400 mb-1.5 uppercase">快速選擇大綱與背景預設</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {CONTEXT_PRESETS.map((preset) => (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              onClick={() => {
+                                setSessionContext(preset.text);
+                                addToast(`載入預設背景：${preset.label}`, 'success');
+                              }}
+                              className={cn(
+                                "text-[11px] px-3 py-1.5 rounded-full border font-bold flex items-center gap-1 transition-all",
+                                sessionContext === preset.text
+                                  ? "bg-indigo-600 text-white border-indigo-700 shadow-sm"
+                                  : "bg-zinc-50 border-zinc-200 text-zinc-600 hover:bg-zinc-100/80"
+                              )}
+                            >
+                              <span>{preset.icon}</span>
+                              <span>{preset.label}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     </div>
 
                     {/* Target dialiect accent manually selecting */}
