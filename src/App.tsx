@@ -250,17 +250,9 @@ export default function App() {
   const [hasNewItems, setHasNewItems] = useState(false);
   const [isCompact, setIsCompact] = useState(true);
 
-  const defaultAiRef = useRef<any>(null);
   const translationIdRef = useRef(0);
   const recognitionRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  // Initialize Default fallback Gemini API
-  if (!defaultAiRef.current) {
-    defaultAiRef.current = new GoogleGenAI({ 
-      apiKey: (process.env.GEMINI_API_KEY as string)
-    });
-  }
 
   // Backup settings to localStorage
   useEffect(() => {
@@ -269,6 +261,9 @@ export default function App() {
 
   const getGeminiClient = useCallback((customKey?: string) => {
     const key = customKey || (process.env.GEMINI_API_KEY as string);
+    if (!key) {
+      throw new Error('尚未設定 Gemini API 金鑰，請於右上角「設定」配置，或改用 OpenAI / Claude 引擎。');
+    }
     return new GoogleGenAI({ apiKey: key });
   }, []);
 
