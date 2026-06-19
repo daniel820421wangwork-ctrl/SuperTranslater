@@ -1,0 +1,6 @@
+{
+  "name": "SwiftTranslate ⚡",
+  "description": "極致快感的即時英翻中翻譯器，隨打即看。",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["AI Translation"]
+}
