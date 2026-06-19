@@ -206,7 +206,7 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         return {
-          provider: parsed.provider || 'openai',
+          provider: parsed.provider || 'claude',
           geminiModel: parsed.geminiModel || 'gemini-3.5-flash',
           openaiModel: parsed.openaiModel || 'gpt-4o-mini',
           claudeModel: parsed.claudeModel || 'claude-3-5-sonnet-latest',
@@ -219,7 +219,7 @@ export default function App() {
       console.error('Error parsing saved settings, resetting.', e);
     }
     return {
-      provider: 'openai',
+      provider: 'claude',
       geminiModel: 'gemini-3.5-flash',
       openaiModel: 'gpt-4o-mini',
       claudeModel: 'claude-3-5-sonnet-latest',
@@ -734,16 +734,37 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-2">
-            {/* Show active Provider & Model */}
-            <div className="hidden md:flex flex-col items-end text-[10px] text-zinc-400 font-mono mr-2">
-              <span className="font-bold text-indigo-600 uppercase flex items-center gap-1">
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500" />
-                {aiSettings.provider}
-              </span>
-              <span className="max-w-[150px] truncate">
-                {aiSettings.provider === 'gemini' ? aiSettings.geminiModel : 
-                 aiSettings.provider === 'openai' ? aiSettings.openaiModel : aiSettings.claudeModel}
-              </span>
+            {/* Quick Provider & Model switcher (always visible) */}
+            <div className="flex items-center gap-1.5 mr-1">
+              <span className="hidden sm:inline-block w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+              <select
+                value={aiSettings.provider}
+                onChange={(e) => setAiSettings(prev => ({ ...prev, provider: e.target.value as AISettings['provider'] }))}
+                title="切換 AI 平台"
+                className="py-2 px-2 bg-zinc-100 border border-zinc-200 rounded-xl text-xs font-bold text-indigo-700 outline-none focus:border-indigo-500 cursor-pointer hover:bg-zinc-200 transition-all"
+              >
+                <option value="openai">OpenAI</option>
+                <option value="claude">Claude</option>
+                <option value="gemini">Gemini</option>
+              </select>
+              <select
+                value={aiSettings.provider === 'gemini' ? aiSettings.geminiModel :
+                       aiSettings.provider === 'openai' ? aiSettings.openaiModel : aiSettings.claudeModel}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setAiSettings(prev => ({
+                    ...prev,
+                    ...(prev.provider === 'gemini' ? { geminiModel: v } :
+                        prev.provider === 'openai' ? { openaiModel: v } : { claudeModel: v }),
+                  }));
+                }}
+                title="切換模型"
+                className="max-w-[160px] py-2 px-2 bg-zinc-100 border border-zinc-200 rounded-xl text-xs font-semibold text-zinc-700 outline-none focus:border-indigo-500 cursor-pointer hover:bg-zinc-200 transition-all truncate"
+              >
+                {PROVIDER_MODELS[aiSettings.provider].map((m) => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
             </div>
 
             {/* Menu Actions */}
