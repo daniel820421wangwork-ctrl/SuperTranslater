@@ -102,9 +102,9 @@ const PROVIDER_MODELS = {
     { value: 'o1-mini', label: 'o1 Mini (進階長鏈推演)' }
   ],
   claude: [
-    { value: 'claude-3-5-sonnet-latest', label: 'Claude 3.5 Sonnet (推薦 - 頂尖語感)' },
-    { value: 'claude-3-5-haiku-latest', label: 'Claude 3.5 Haiku (極速輕盈)' },
-    { value: 'claude-3-opus-latest', label: 'Claude 3 Opus (文學史詩大作)' }
+    { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (推薦 - 頂尖語感)' },
+    { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (極速輕盈)' },
+    { value: 'claude-opus-4-8', label: 'Claude Opus 4.8 (旗艦 - 最高能力)' }
   ]
 };
 
@@ -170,8 +170,7 @@ const callClaude = async (apiKey: string, model: string, text: string, systemIns
       system: systemInstruction,
       messages: [
         { role: 'user', content: text }
-      ],
-      temperature: 0.3
+      ]
     })
   });
   if (!response.ok) {
@@ -209,7 +208,7 @@ export default function App() {
           provider: parsed.provider || 'claude',
           geminiModel: parsed.geminiModel || 'gemini-3.5-flash',
           openaiModel: parsed.openaiModel || 'gpt-4o-mini',
-          claudeModel: parsed.claudeModel || 'claude-3-5-sonnet-latest',
+          claudeModel: parsed.claudeModel || 'claude-sonnet-4-6',
           geminiKey: parsed.geminiKey || '',
           openaiKey: parsed.openaiKey || '',
           claudeKey: parsed.claudeKey || '',
@@ -222,7 +221,7 @@ export default function App() {
       provider: 'claude',
       geminiModel: 'gemini-3.5-flash',
       openaiModel: 'gpt-4o-mini',
-      claudeModel: 'claude-3-5-sonnet-latest',
+      claudeModel: 'claude-sonnet-4-6',
       geminiKey: '',
       openaiKey: '',
       claudeKey: '',
