@@ -1,6 +1,10 @@
 # SwiftTranslate ⚡ — 極致快感的即時英翻中 & AI 特徵比對翻譯器
 
-[![GitHub Repository](https://img.shields.io/badge/GitHub-Repository-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/daniel820421wang/SwiftTranslate)
+> 🌐 **線上直接使用（免安裝）**：**https://daniel820421wangwork-ctrl.github.io/SuperTranslater/**
+> 開啟後於右上角「設定 → AI」填入你的 OpenAI / Claude / Gemini 金鑰即可開始翻譯。
+
+[![Live App](https://img.shields.io/badge/🌐_線上使用-Open_App-2ECC71?style=for-the-badge&logoColor=white)](https://daniel820421wangwork-ctrl.github.io/SuperTranslater/)
+[![GitHub Repository](https://img.shields.io/badge/GitHub-Repository-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/daniel820421wangwork-ctrl/SuperTranslater)
 [![Open in AI Studio](https://img.shields.io/badge/Google_AI_Studio-Build_&_Developer-8E44AD?style=for-the-badge&logo=google&logoColor=white)](https://ai.studio/build)
 [![Live Demo Preview](https://img.shields.io/badge/Live_Demo-Open_Application-2ECC71?style=for-the-badge&logo=codeforces&logoColor=white)](https://ais-pre-topr4gj6vr6a2y6dkhjnbo-170806837407.asia-northeast1.run.app)
 [![Dev Sandbox](https://img.shields.io/badge/Dev_Sandbox-Workspace_Mode-3498DB?style=for-the-badge&logo=visual-studio-code&logoColor=white)](https://ais-dev-topr4gj6vr6a2y6dkhjnbo-170806837407.asia-northeast1.run.app)
