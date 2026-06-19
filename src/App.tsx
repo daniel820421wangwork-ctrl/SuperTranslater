@@ -195,6 +195,9 @@ export default function App() {
   // Speech Recognition States
   const [isRecording, setIsRecording] = useState(false);
   const isActualRecordingRef = useRef(false);
+  // True while the user wants continuous recording — lets us auto-restart the
+  // Web Speech API when it ends on its own (silence/timeout) instead of pausing.
+  const shouldKeepRecordingRef = useRef(false);
   const [interimTranscript, setInterimTranscript] = useState('');
   const [selectedLang, setSelectedLang] = useState('en-US');
 
@@ -547,14 +550,35 @@ export default function App() {
         } else if (event.error !== 'no-speech') {
           addToast(`錄音發生錯誤：${event.error}。推薦使用下方手動鍵盤輸入唷！`);
         }
+        // 'no-speech' is recoverable — keep recording and let onend restart it.
+        // Any other error is fatal, so stop trying to auto-restart.
+        if (event.error !== 'no-speech') {
+          shouldKeepRecordingRef.current = false;
+        }
         setIsRecording(false);
         isActualRecordingRef.current = false;
       };
 
       recognition.onend = () => {
         isActualRecordingRef.current = false;
-        setIsRecording(false);
         setInterimTranscript('');
+        // The API often ends on its own after a pause or ~60s. If the user still
+        // wants to record, restart it so it doesn't silently stop mid-session.
+        if (shouldKeepRecordingRef.current) {
+          try {
+            recognition.start();
+            return;
+          } catch (err) {
+            console.warn('Auto-restart failed, retrying shortly', err);
+            setTimeout(() => {
+              if (shouldKeepRecordingRef.current) {
+                try { recognition.start(); } catch (e) { console.error('Restart failed', e); }
+              }
+            }, 300);
+            return;
+          }
+        }
+        setIsRecording(false);
       };
 
       recognitionRef.current = recognition;
@@ -569,6 +593,7 @@ export default function App() {
 
     if (isActualRecordingRef.current) {
       try {
+        shouldKeepRecordingRef.current = false; // user-initiated stop: don't auto-restart
         recognitionRef.current.stop();
       } catch (err) {
         console.error('Stop recognition error:', err);
@@ -577,6 +602,7 @@ export default function App() {
       try {
         setError(null);
         setSpeechErrorDetected(null);
+        shouldKeepRecordingRef.current = true; // keep recording across auto-ends
         recognitionRef.current.start();
       } catch (err) {
         // Ignore "already started" error if it somehow still happens
@@ -587,6 +613,7 @@ export default function App() {
           return;
         }
         console.error('Start recognition error:', err);
+        shouldKeepRecordingRef.current = false;
         setSpeechErrorDetected('start-failed');
         setIsRecording(false);
         isActualRecordingRef.current = false;
