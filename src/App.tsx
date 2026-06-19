@@ -204,11 +204,15 @@ export default function App() {
       const saved = localStorage.getItem('swift_transcript_ai_settings_v2');
       if (saved) {
         const parsed = JSON.parse(saved);
+        // Coerce a stored model back to a valid one if it's no longer offered
+        // (e.g. a retired Claude model ID saved before the list was updated).
+        const validModel = (provider: keyof typeof PROVIDER_MODELS, value: string) =>
+          PROVIDER_MODELS[provider].some((m) => m.value === value) ? value : PROVIDER_MODELS[provider][0].value;
         return {
           provider: parsed.provider || 'claude',
-          geminiModel: parsed.geminiModel || 'gemini-3.5-flash',
-          openaiModel: parsed.openaiModel || 'gpt-4o-mini',
-          claudeModel: parsed.claudeModel || 'claude-sonnet-4-6',
+          geminiModel: validModel('gemini', parsed.geminiModel || 'gemini-3.5-flash'),
+          openaiModel: validModel('openai', parsed.openaiModel || 'gpt-4o-mini'),
+          claudeModel: validModel('claude', parsed.claudeModel || 'claude-sonnet-4-6'),
           geminiKey: parsed.geminiKey || '',
           openaiKey: parsed.openaiKey || '',
           claudeKey: parsed.claudeKey || '',
