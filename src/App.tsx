@@ -118,9 +118,15 @@ interface AISettings {
   claudeKey: string;
 }
 
-// CORS-safe API fetching helper for OpenAI via Vite proxy
+// In dev we route through the Vite proxy; in production (static hosting like
+// GitHub Pages) we call the providers directly — both OpenAI and Anthropic
+// allow browser CORS requests.
+const OPENAI_BASE = import.meta.env.PROD ? 'https://api.openai.com' : '/api/openai';
+const ANTHROPIC_BASE = import.meta.env.PROD ? 'https://api.anthropic.com' : '/api/anthropic';
+
+// CORS-safe API fetching helper for OpenAI
 const callOpenAI = async (apiKey: string, model: string, text: string, systemInstruction: string) => {
-  const url = '/api/openai/v1/chat/completions';
+  const url = `${OPENAI_BASE}/v1/chat/completions`;
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -147,9 +153,9 @@ const callOpenAI = async (apiKey: string, model: string, text: string, systemIns
   throw new Error('未知的 OpenAI 回傳格式');
 };
 
-// CORS-safe API fetching helper for Claude via Vite proxy
+// CORS-safe API fetching helper for Claude
 const callClaude = async (apiKey: string, model: string, text: string, systemInstruction: string) => {
-  const url = '/api/anthropic/v1/messages';
+  const url = `${ANTHROPIC_BASE}/v1/messages`;
   const response = await fetch(url, {
     method: 'POST',
     headers: {
