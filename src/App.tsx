@@ -4,7 +4,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   Languages, Copy, Check, Info, Zap, Trash2, 
   ArrowRightLeft, Mic, MicOff, XCircle, StopCircle, 
-  FileText, X, Sparkles, ListChecks, Sliders, Settings, Key, Globe, Brain, RefreshCw
+  FileText, X, Sparkles, ListChecks, Sliders, Settings, Key, Globe, Brain, RefreshCw,
+  Edit, ArrowUp
 } from 'lucide-react';
 import { cn } from './lib/utils';
 
@@ -26,6 +27,67 @@ const CONTEXT_PRESETS = [
   { id: 'casual-cafe', icon: '☕', label: '咖啡口語', text: '紐約咖啡廳的日常生活口語交談，充滿美式連讀、口語化俚語與點餐常用縮略詞。' },
   { id: 'ind-service', icon: '📞', label: '技術客服', text: '印度客服中心對接技術支援，討論資料庫重構、伺服器伺服端口溢出與重啟除錯等特有的專有術語。' }
 ];
+
+// Analyze text content and suggest the best memory preset based on keywords
+const analyzeSessionMemory = (text: string) => {
+  if (!text) {
+    return { recommendedId: 'casual-cafe', matchedWords: [], maxScore: 0 };
+  }
+  const lower = text.toLowerCase();
+  const presetsKeywords: { [key: string]: string[] } = {
+    'nz-econ': ['economic', 'market', 'trade', 'inflation', 'gdp', 'demand', 'supply', 'keynes', 'professor', 'finance', 'dollar', 'zealand'],
+    'tech-dev': ['api', 'developer', 'server', 'code', 'bug', 'agile', 'architecture', 'microservices', 'deployment', 'cloud', 'system', 'programming'],
+    'biz-coop': ['contract', 'nda', 'business', 'legal', 'clause', 'intellectual', 'property', 'terms', 'negotiation', 'agreement', 'cooperation'],
+    'casual-cafe': ['coffee', 'weather', 'latte', 'cafe', 'menu', 'cup', 'food', 'slang', 'daily', 'lunch', 'dinner', 'breakfast'],
+    'ind-service': ['database', 'reboot', 'restart', 'overflow', 'support', 'port', 'error', 'crash', 'ticket', 'router', 'dns']
+  };
+
+  const scores: { [key: string]: number } = {
+    'nz-econ': 0,
+    'tech-dev': 0,
+    'biz-coop': 0,
+    'casual-cafe': 0,
+    'ind-service': 0
+  };
+
+  const matchedWordsMap: { [key: string]: string[] } = {
+    'nz-econ': [],
+    'tech-dev': [],
+    'biz-coop': [],
+    'casual-cafe': [],
+    'ind-service': []
+  };
+
+  for (const [id, words] of Object.entries(presetsKeywords)) {
+    words.forEach(word => {
+      if (lower.includes(word)) {
+        scores[id] += 1;
+        const regex = new RegExp('\\b' + word + '\\b', 'i');
+        if (regex.test(lower)) {
+          scores[id] += 2;
+        }
+        if (!matchedWordsMap[id].includes(word)) {
+          matchedWordsMap[id].push(word);
+        }
+      }
+    });
+  }
+
+  let recommendedId = 'casual-cafe';
+  let maxScore = 0;
+  for (const [id, score] of Object.entries(scores)) {
+    if (score > maxScore) {
+      maxScore = score;
+      recommendedId = id;
+    }
+  }
+
+  return {
+    recommendedId,
+    matchedWords: matchedWordsMap[recommendedId] || [],
+    maxScore
+  };
+};
 
 // Available models per provider
 const PROVIDER_MODELS = {
@@ -167,6 +229,7 @@ export default function App() {
   const [isExtractingContext, setIsExtractingContext] = useState(false);
   const [isFullViewOpen, setIsFullViewOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isMemoryOpen, setIsMemoryOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'speech' | 'ai'>('speech');
   const [summary, setSummary] = useState('');
   const [isSummarizing, setIsSummarizing] = useState(false);
@@ -175,6 +238,11 @@ export default function App() {
   // Manual text fallback & voice error states
   const [manualInputText, setManualInputText] = useState('');
   const [speechErrorDetected, setSpeechErrorDetected] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState<string>('');
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const [hasNewItems, setHasNewItems] = useState(false);
+  const [isCompact, setIsCompact] = useState(true);
 
   const defaultAiRef = useRef<any>(null);
   const translationIdRef = useRef(0);
@@ -553,19 +621,57 @@ export default function App() {
     }
   };
 
-  // Auto-scroll to top of history whenever NEW content updates
+  const handleSaveSegmentEdit = async (id: string) => {
+    const text = editingText.trim();
+    if (!text) {
+      addToast('段落原始英文文本不得為空。', 'info');
+      return;
+    }
+
+    // Set segment to loading state to give dynamic micro-interactions feedback
+    setHistory(prev => prev.map(item => item.id === id ? { ...item, original: text, translated: undefined } : item));
+    setEditingId(null);
+    setEditingText('');
+
+    try {
+      addToast('正在依據修改文本重新進行口音與比對翻譯中...', 'info');
+      await translateSegment(text, id);
+      addToast('段落原始稿修正與比對翻譯成功！', 'success');
+    } catch (err) {
+      console.error('Re-translating edited segment error:', err);
+      addToast('重新比對翻譯失敗。', 'error');
+    }
+  };
+
+  // Check if new items are added while the user was scrolled down to flag it on the button
   useEffect(() => {
-    const scrollContainer = scrollRef.current;
-    if (scrollContainer) {
-      const timeoutId = setTimeout(() => {
-        scrollContainer.scrollTo({
-          top: 0,
-          behavior: 'smooth'
-        });
-      }, 50);
-      return () => clearTimeout(timeoutId);
+    if (history.length > 0) {
+      const scrollContainer = scrollRef.current;
+      if (scrollContainer) {
+        if (scrollContainer.scrollTop > 80) {
+          setHasNewItems(true);
+        }
+      }
     }
   }, [history]);
+
+  const scrollToTop = () => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({
+        top: 0,
+        behavior: 'smooth'
+      });
+      setHasNewItems(false);
+    }
+  };
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const target = e.currentTarget;
+    setShowScrollTop(target.scrollTop > 120);
+    if (target.scrollTop <= 50) {
+      setHasNewItems(false);
+    }
+  };
 
   const handleClear = () => {
     setTranslatedText('');
@@ -641,9 +747,17 @@ export default function App() {
 
             {/* Menu Actions */}
             <button 
+              onClick={() => setIsMemoryOpen(true)}
+              className="px-3.5 py-2 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 hover:text-indigo-850 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 border border-indigo-100"
+              title="配置口音學術名詞、自訂課堂或會議大綱背景記憶"
+            >
+              <Brain className="w-3.5 h-3.5 text-indigo-600" />
+              <span>記憶設定</span>
+            </button>
+            <button 
               onClick={() => setIsSettingsOpen(true)}
               className="px-3.5 py-2 text-zinc-600 bg-zinc-100 hover:bg-zinc-200 hover:text-indigo-600 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 border border-zinc-200/50"
-              title="配置口音、主題背景、自訂 API 金鑰與模型"
+              title="配置自訂 API 金鑰與模型運算核心"
             >
               <Settings className="w-3.5 h-3.5" />
               <span>設定</span>
@@ -731,184 +845,167 @@ export default function App() {
                 </>
               )}
             </button>
-          </div>
 
-          {/* Fallback & Manual Text Input Portal */}
-          <div className="bg-white border border-zinc-200/80 rounded-3xl p-5 shadow-sm space-y-3 shrink-0">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-[10px] text-zinc-400 font-mono">FALLBACK / MANUAL INPUT</p>
-                <p className="text-xs font-bold text-zinc-700 flex items-center gap-1.5 mt-1">
-                  <FileText className="w-4 h-4 text-zinc-500" />
-                  手動輸入比對翻譯
-                </p>
-              </div>
-              <span className="text-[9px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 font-bold border border-indigo-100">
-                100% 穩定自適應
-              </span>
-            </div>
-
-            {speechErrorDetected && (
-              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-800 leading-relaxed">
-                💡 <strong>系統提示：</strong> 偵測到您的瀏覽器或沙盒 iframe 限制了線上語音連線 (Web Speech API 狀態: {speechErrorDetected === 'network' ? '網路/線上伺服器連線中斷' : `錯誤狀態: ${speechErrorDetected}`})。別擔心！您可以直接在下方輸入框鍵盤輸入、或複製貼上任何英文對白段落，AI 特徵比對、自適應大綱與精準翻譯依然 here and 100% 完美運作唷！
-              </div>
-            )}
-
-            <div className="relative">
-              <textarea
-                placeholder="在此貼上或鍵盤手動輸入英文段落，例如: 'We are learning about New Zealand economic history today...'，並點擊下方按鈕以啟動法醫級口音比對分析與翻譯..."
-                value={manualInputText}
-                onChange={(e) => setManualInputText(e.target.value)}
-                disabled={isTranslating}
-                className="w-full h-24 p-3 bg-zinc-50 border border-zinc-200 rounded-2xl text-xs outline-none focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 transition-all resize-none shadow-inner text-zinc-700 placeholder:text-zinc-400"
-              />
-            </div>
-
-            <button
-              onClick={submitManualText}
-              disabled={isTranslating || !manualInputText.trim()}
-              className={cn(
-                "w-full py-3 px-4 rounded-xl transition-all font-bold text-xs flex items-center justify-center gap-2 border shadow-sm",
-                !manualInputText.trim() 
-                  ? "bg-zinc-100 border-zinc-200 text-zinc-400 cursor-not-allowed" 
-                  : isTranslating 
-                  ? "bg-indigo-50 border-indigo-200 text-indigo-700 cursor-wait" 
-                  : "bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200 hover:border-indigo-300"
-              )}
-            >
-              <Sparkles className={cn("w-4 h-4", isTranslating && "animate-spin")} />
-              <span>{isTranslating ? "正在精準翻譯與口音特徵比對中..." : "送出文本進行分析"}</span>
-            </button>
-          </div>
-
-          {/* Active Live Segment Display */}
-          {(history.length > 0 || interimTranscript || isRecording) ? (
-            <div className="space-y-4">
-              
-              {/* Live Input text */}
-              <div className="bg-white border border-zinc-200 p-5 rounded-2xl shadow-sm">
-                <p className="text-[10px] text-zinc-400 font-mono uppercase tracking-widest flex items-center gap-2 mb-2">
-                  <span className={cn("w-1.5 h-1.5 rounded-full", isRecording ? "bg-red-500 animate-pulse" : "bg-zinc-300")} />
-                  即時語音 (Live Input)
-                </p>
-                <div className="text-zinc-800 text-base leading-relaxed min-h-[3em]">
+            {/* Real-time Listening Transcript Section */}
+            {(isRecording || interimTranscript) && (
+              <div className="mt-3 p-3.5 bg-zinc-50 border border-zinc-200/60 rounded-2xl space-y-2 animate-fade-in">
+                <div className="flex items-center gap-2">
+                  <span className="flex h-2 w-2 relative">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                  </span>
+                  <span className="text-[10px] font-black uppercase text-zinc-400 tracking-wider font-mono flex items-center gap-1">
+                    即時收錄中 (Live listening...)
+                  </span>
+                </div>
+                <div className="text-xs text-zinc-800 leading-relaxed font-sans italic break-words min-h-[24px]">
                   {interimTranscript ? (
-                    <span className="text-zinc-500 italic block">{interimTranscript}</span>
-                  ) : isRecording ? (
-                    <span className="text-zinc-300 animate-pulse text-sm">輕聲說話，網頁將自動分析聽寫...</span>
+                    <span className="text-zinc-900 font-semibold not-italic">{interimTranscript}</span>
                   ) : (
-                    <span className="text-zinc-400 text-sm">無正在聽入之語音。點擊上方按鈕開始錄取。</span>
+                    <span className="text-zinc-400 animate-pulse">請開始講話，即時轉錄文字會顯示在此處...</span>
                   )}
                 </div>
               </div>
+            )}
+          </div>
 
-              {/* Dynamic Live Translation progress indication if needed */}
-              {isTranslating && (
-                <div className="bg-indigo-600 text-white p-5 rounded-2xl shadow-md relative overflow-hidden">
-                  <p className="text-[10px] text-indigo-200 font-mono uppercase tracking-widest flex items-center gap-2 mb-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
-                    AI TRANSLATOR ACTIVE
-                  </p>
-                  <p className="text-sm font-medium animate-pulse">正在利用 {aiSettings.provider} 精準翻譯中...</p>
-                  <motion.div 
-                    initial={{ x: '-100%' }}
-                    animate={{ x: '100%' }}
-                    transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
-                    className="absolute bottom-0 left-0 right-0 h-1 bg-white/30"
-                  />
-                </div>
-              )}
-
+          {/* Dedicated Session Memory & Auto-Recommendation Widget */}
+          <div className="bg-white border border-zinc-200/80 rounded-3xl p-5 shadow-sm space-y-3.5 shrink-0">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-[10px] text-zinc-400 font-mono uppercase">Session Memory</p>
+                <p className="text-xs font-black text-zinc-700 flex items-center gap-1.5 mt-0.5">
+                  <Brain className="w-4 h-4 text-indigo-500" />
+                  AI 記憶大綱設定
+                </p>
+              </div>
+              <button
+                onClick={() => setIsMemoryOpen(true)}
+                className="text-[10px] font-extrabold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-2.5 py-1.5 rounded-lg transition-all"
+              >
+                配置記憶
+              </button>
             </div>
-          ) : (
-            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-white border border-dashed border-zinc-200 rounded-3xl opacity-60">
-              <Languages className="w-10 h-10 text-zinc-300 mb-2" />
-              <p className="text-xs font-bold text-zinc-600">目前尚無即時數據</p>
-              <p className="text-[10px] text-zinc-400 max-w-[200px] mt-1">開啟上方聽寫按鈕，AI 將即時進行逐字翻譯與口音特徵檢索</p>
+
+            {/* Current Active Preset display */}
+            <div className="p-3 bg-zinc-50 rounded-2xl border border-zinc-100/80 flex items-start gap-2.5">
+              <span className="text-xl leading-none flex items-center justify-center p-2 bg-white rounded-xl border border-zinc-200/60 shadow-sm shrink-0">
+                {(() => {
+                  const currentPreset = CONTEXT_PRESETS.find(p => p.text === sessionContext);
+                  return currentPreset ? currentPreset.icon : '📝';
+                })()}
+              </span>
+              <div className="space-y-0.5 min-w-0">
+                <span className="text-[11px] font-black text-zinc-700 block">
+                  {(() => {
+                    const currentPreset = CONTEXT_PRESETS.find(p => p.text === sessionContext);
+                    return currentPreset ? currentPreset.label : '自訂情境資料庫';
+                  })()}
+                </span>
+                <p className="text-[10px] text-zinc-450 truncate leading-snug">
+                  {sessionContext || '目前尚未設置任何專業背景記憶大綱。'}
+                </p>
+              </div>
+            </div>
+
+            {/* Live Recommendation Matcher */}
+            {(() => {
+              const fullSpeechText = history.map(h => h.original).join(' ') + ' ' + interimTranscript;
+              const { recommendedId, matchedWords } = analyzeSessionMemory(fullSpeechText);
+              const currentPreset = CONTEXT_PRESETS.find(p => p.text === sessionContext);
+              const recPreset = CONTEXT_PRESETS.find(p => p.id === recommendedId);
+
+              const isActiveProfileRec = currentPreset && currentPreset.id === recommendedId;
+              const hasText = fullSpeechText.trim().length > 3;
+
+              if (recPreset && !isActiveProfileRec && hasText) {
+                return (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.98 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className="p-3 bg-gradient-to-r from-violet-50 to-indigo-50 rounded-2xl border border-indigo-150 flex flex-col gap-2 shadow-inner"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] font-black text-violet-700 flex items-center gap-1">
+                        <Sparkles className="w-3.5 h-3.5 text-violet-500 fill-violet-200 animate-spin" />
+                        AI 偵測主題推薦
+                      </span>
+                      <span className="text-[8px] bg-white text-indigo-500 border border-indigo-100 px-1.5 py-0.5 rounded font-mono font-bold">
+                        匹配
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-zinc-650 leading-relaxed">
+                      語音中包含「<strong>{matchedWords.slice(0, 3).join(', ')}</strong>」等關鍵術語。建議切換至「<strong>{recPreset.label}</strong>」記憶背景以健全翻譯。
+                    </p>
+                    <button
+                      onClick={() => {
+                        setSessionContext(recPreset.text);
+                        addToast(`已自動轉換對話記憶為：${recPreset.label}`, 'success');
+                      }}
+                      className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[10px] py-1.5 rounded-xl transition-all shadow-md shadow-indigo-100"
+                    >
+                      一鍵切換記憶：{recPreset.icon} {recPreset.label}
+                    </button>
+                  </motion.div>
+                );
+              } else if (hasText && recPreset) {
+                return (
+                  <div className="flex items-center gap-2 text-emerald-600 bg-emerald-50/50 border border-emerald-100 p-2.5 rounded-2xl text-[10px]">
+                    <Check className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                    <span>AI 當前匹配率優良：<strong>{recPreset.label}</strong></span>
+                  </div>
+                );
+              }
+              return null;
+            })()}
+          </div>
+
+          {/* Browser Speech Compatibility Tips */}
+          {speechErrorDetected && (
+            <div className="bg-amber-50/80 border border-amber-200/60 p-4 rounded-3xl text-[11px] text-amber-800 leading-relaxed shadow-sm">
+              💡 <strong>麥克風/語音連線提示：</strong>
+              <span className="block mt-1">偵測到瀏覽器語音聽寫限制 ({speechErrorDetected === 'network' ? '網路語音伺服器連線中斷/受限' : `狀態: ${speechErrorDetected}`})。別擔心！請直接在右側對話歷史清單中，對任何對話段落點擊<strong>「手動修正」</strong>重新整理儲存，AI 同樣能為您生成翻譯。</span>
             </div>
           )}
-
-          {/* Accent Match recommendation (AI Accent Match Widget) */}
-          <AnimatePresence>
-            {detectedAccent && detectedAccent.code !== selectedLang && (
-              <motion.div 
-                initial={{ opacity: 0, y: 15 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                className="bg-indigo-50 border border-indigo-100 p-5 rounded-3xl shadow-sm flex flex-col gap-3 shrink-0"
-              >
-                <div className="flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-indigo-600 fill-indigo-100" />
-                  <span className="text-[10px] font-black uppercase text-indigo-600 tracking-wider">
-                    AI 語音特徵比對建議
-                  </span>
-                </div>
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between">
-                    <p className="text-xs font-bold text-zinc-800">偵測為：{detectedAccent.label}</p>
-                    <span className="text-[10px] font-black text-indigo-600 bg-white px-2 py-0.5 rounded shadow-sm border border-indigo-100">
-                      {detectedAccent.confidence}% 信心
-                    </span>
-                  </div>
-                  
-                  {/* Confidence Bar */}
-                  <div className="w-full h-1 bg-zinc-200 rounded-full overflow-hidden my-1.5">
-                    <motion.div 
-                      initial={{ width: 0 }}
-                      animate={{ width: `${detectedAccent.confidence}%` }}
-                      className="h-full bg-indigo-500"
-                    />
-                  </div>
-
-                  <div className="flex flex-wrap gap-1 my-1.5">
-                    {detectedAccent.traits.map((trait, i) => (
-                      <span key={i} className="text-[8px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-md font-medium">
-                        {trait}
-                      </span>
-                    ))}
-                  </div>
-                  <p className="text-[10px] text-zinc-500 leading-normal">原因比對：{detectedAccent.reason}</p>
-                </div>
-                <button
-                  onClick={() => {
-                    setSelectedLang(detectedAccent.code);
-                    setDetectedAccent(null);
-                    addToast(`根據語音分析，已自動切換偵測為 ${detectedAccent.label}`, 'success');
-                  }}
-                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded-xl text-xs font-extrabold transition-colors flex items-center justify-center gap-2 shadow-sm"
-                >
-                  立即調整此堂課語音口音
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          <div className="mt-auto hidden lg:block pt-4 border-t border-zinc-200/40 opacity-40">
-            <p className="text-[9px] text-zinc-400 font-mono">DEVICE STATUS: CONNECTED</p>
-          </div>
         </section>
 
         {/* Right Side: Finalized Timeline (對話時間軸歷史記錄) - Completely Unobstructed! */}
-        <section className="flex-1 bg-white p-6 md:p-8 flex flex-col overflow-hidden">
+        <section className="flex-1 bg-white p-3.5 md:p-4.5 flex flex-col overflow-hidden relative">
           
-          <div className="flex-none flex items-center justify-between mb-4 border-b border-zinc-100 pb-3">
+          <div className="flex-none flex items-center justify-between mb-2 border-b border-zinc-100 pb-2">
             <div>
-              <h2 className="text-sm font-bold text-zinc-800 flex items-center gap-2">
+              <h2 className="text-sm font-bold text-zinc-805 flex items-center gap-1.5">
                 <ListChecks className="w-4 h-4 text-indigo-600" />
                 課堂與會議歷史逐字稿
               </h2>
-              <p className="text-[11px] text-zinc-400 mt-0.5">
+              <p className="text-[10px] text-zinc-400 mt-0.5">
                 點擊上方錄音，已翻譯完成的每個完整段落將在下方獨立存檔
               </p>
             </div>
-            <span className="text-[10px] font-mono text-zinc-400 bg-zinc-100 px-2.5 py-1 rounded-full font-bold">
-              共計：{history.length} 個片段
-            </span>
+            
+            <div className="flex items-center gap-2">
+              {/* Compact / Comfortable density toggle */}
+              <button
+                onClick={() => setIsCompact(!isCompact)}
+                className="text-[10px] font-extrabold flex items-center gap-1 px-2 py-1 rounded-lg border border-zinc-250 bg-white hover:bg-zinc-50 text-zinc-600 shadow-sm transition-all select-none"
+                title={isCompact ? "切換成舒適卡片模式" : "切換成緊湊高密度模式"}
+              >
+                <span>{isCompact ? "⚡️ 緊湊高密度" : "📖 舒適卡片"}</span>
+              </button>
+              
+              <span className="text-[10px] font-mono text-zinc-400 bg-zinc-100 px-2.5 py-1.5 rounded-lg font-bold">
+                共計：{history.length} 個片段
+              </span>
+            </div>
           </div>
 
           <div 
             ref={scrollRef}
-            className="flex-1 overflow-y-auto pr-1 space-y-6 custom-scrollbar"
+            onScroll={handleScroll}
+            className={cn(
+              "flex-1 overflow-y-auto pr-1 custom-scrollbar",
+              isCompact ? "space-y-0" : "space-y-2.5"
+            )}
           >
             {history.length === 0 ? (
               <div className="h-64 flex flex-col items-center justify-center text-zinc-300 text-center">
@@ -919,61 +1016,225 @@ export default function App() {
                 </p>
               </div>
             ) : (
-              <div className="space-y-4">
-                {history.map((entry) => (
-                  <motion.div 
-                    key={entry.id}
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="grid grid-cols-1 md:grid-cols-2 gap-4 group/entry border border-zinc-100 p-4 rounded-2xl hover:bg-zinc-50/50 hover:border-zinc-200 transition-all shadow-sm"
-                  >
-                    {/* English card */}
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
-                        <span className="font-bold text-indigo-500 uppercase tracking-widest text-[9px]">English Input</span>
-                        <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
-                      </div>
-                      <p className="text-zinc-800 text-base leading-relaxed font-normal">{entry.original}</p>
-                    </div>
-
-                    {/* Chinese translation card */}
-                    <div className="flex flex-col justify-between space-y-2 border-t md:border-t-0 md:border-l border-zinc-100 pt-3 md:pt-0 md:pl-4">
-                      <div>
-                        <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono mb-1">
-                          <span className="font-bold text-indigo-600 uppercase tracking-widest text-[9px]">Taiwan Translation</span>
-                          {entry.translated && (
-                            <button 
-                              onClick={() => {
-                                navigator.clipboard.writeText(entry.translated!);
-                                addToast('複製成功！', 'success');
-                              }}
-                              className="p-1 hover:text-indigo-600 transition-colors opacity-40 group-hover/entry:opacity-100"
-                              title="複製翻譯結果"
-                            >
-                              <Copy className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </div>
-                        {entry.translated ? (
-                          <p className="text-zinc-900 text-base leading-relaxed font-bold">{entry.translated}</p>
-                        ) : (
-                          <div className="flex items-center gap-2 text-indigo-400 font-medium py-2">
-                            <div className="flex gap-1">
-                              <span className="w-2.5 h-2.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
-                              <span className="w-2.5 h-2.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
-                              <span className="w-2.5 h-2.5 bg-indigo-500 rounded-full animate-bounce"></span>
+              <div className={isCompact ? "" : "space-y-2.5"}>
+                {history.map((entry) => {
+                  const isEditing = editingId === entry.id;
+                  return (
+                    <motion.div 
+                      key={entry.id}
+                      initial={{ opacity: 0, y: isCompact ? -5 : -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className={cn(
+                        "group/entry transition-all",
+                        isCompact 
+                          ? "p-2 grid grid-cols-1 md:grid-cols-12 gap-3 items-start border-b border-zinc-100 hover:bg-zinc-50/70" 
+                          : "grid grid-cols-1 md:grid-cols-2 gap-3 border border-zinc-100 p-2.5 md:p-3 rounded-xl hover:bg-zinc-50/50 hover:border-zinc-200 shadow-sm"
+                      )}
+                    >
+                      {isCompact ? (
+                        <>
+                          {/* Left-hand column: Metadata (Time + Quick Action button) */}
+                          <div className="md:col-span-1.5 flex md:flex-col items-center md:items-start justify-between md:justify-start gap-1 text-[10px] text-zinc-400 font-mono h-full pt-0.5 shrink-0 select-none">
+                            <span className="font-semibold text-zinc-400/80">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                            <div className="flex md:flex-row gap-1 items-center md:mt-1 opacity-40 group-hover/entry:opacity-100 transition-opacity">
+                              {!isEditing && (
+                                <button
+                                  onClick={() => {
+                                    setEditingId(entry.id);
+                                    setEditingText(entry.original);
+                                  }}
+                                  className="text-zinc-400 hover:text-indigo-600 p-0.5 rounded hover:bg-zinc-100/80 transition-colors"
+                                  title="修正英文聽寫內容"
+                                >
+                                  <Edit className="w-3 h-3" />
+                                </button>
+                              )}
+                              {entry.translated && (
+                                <button 
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(entry.translated!);
+                                    addToast('複製成功！', 'success');
+                                  }}
+                                  className="text-zinc-400 hover:text-indigo-600 p-0.5 rounded hover:bg-zinc-100/80 transition-colors"
+                                  title="複製中文翻譯"
+                                >
+                                  <Copy className="w-3 h-3" />
+                                </button>
+                              )}
                             </div>
-                            <span className="text-sm italic">法醫級精準比對翻譯中...</span>
                           </div>
-                        )}
-                      </div>
-                    </div>
 
-                  </motion.div>
-                ))}
+                          {/* Middle column: English */}
+                          <div className="md:col-span-5.5 min-w-0">
+                            {isEditing ? (
+                              <div className="space-y-1.5">
+                                <textarea
+                                  value={editingText}
+                                  onChange={(e) => setEditingText(e.target.value)}
+                                  className="w-full min-h-[55px] p-2 bg-zinc-50 border border-zinc-205 rounded-lg text-xs outline-none focus:border-indigo-505 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 transition-all font-sans leading-relaxed"
+                                  placeholder="在此修訂英文內容..."
+                                />
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    onClick={() => handleSaveSegmentEdit(entry.id)}
+                                    className="px-2 py-0.5 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[9px] rounded transition-all flex items-center gap-0.5"
+                                  >
+                                    <Check className="w-2.5 h-2.5" />
+                                    <span>儲存</span>
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setEditingId(null);
+                                      setEditingText('');
+                                    }}
+                                    className="px-2 py-0.5 bg-zinc-105 hover:bg-zinc-200 text-zinc-650 font-bold text-[9px] rounded transition-all"
+                                  >
+                                    取消
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-zinc-750 text-[13px] leading-relaxed font-normal">{entry.original}</p>
+                            )}
+                          </div>
+
+                          {/* Right column: Chinese translation */}
+                          <div className="md:col-span-5 border-t border-dashed border-zinc-100 pt-1.5 md:pt-0 md:border-t-0 md:border-l md:pl-3.5 min-w-0">
+                            {entry.translated ? (
+                              <p className="text-zinc-900 text-[13px] leading-relaxed font-bold">{entry.translated}</p>
+                            ) : (
+                              <div className="flex items-center gap-1 text-indigo-400 font-medium py-0.5 select-none">
+                                <div className="flex gap-0.5">
+                                  <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                                  <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                                  <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce"></span>
+                                </div>
+                                <span className="text-[11px] italic">翻譯中...</span>
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          {/* Comfortable: English card */}
+                          <div className="space-y-1">
+                            <div className="flex items-center justify-between text-[9px] text-zinc-400 font-mono">
+                              <span className="font-bold text-indigo-500 uppercase tracking-widest flex items-center gap-1">
+                                <FileText className="w-2.5 h-2.5 text-indigo-400" />
+                                English
+                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                                {!isEditing && (
+                                  <button
+                                    onClick={() => {
+                                      setEditingId(entry.id);
+                                      setEditingText(entry.original);
+                                    }}
+                                    className="text-zinc-400 hover:text-indigo-600 transition-colors flex items-center gap-0.5 p-0.5 rounded hover:bg-zinc-100"
+                                    title="修正此段落的語音聽寫內容"
+                                  >
+                                    <Edit className="w-2.5 h-2.5" />
+                                    <span className="text-[8px] font-bold">手動修正</span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {isEditing ? (
+                              <div className="space-y-1.5">
+                                <textarea
+                                  value={editingText}
+                                  onChange={(e) => setEditingText(e.target.value)}
+                                  className="w-full min-h-[70px] p-2 bg-zinc-50 border border-zinc-200 rounded-lg text-xs outline-none focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 transition-all resize-y text-zinc-805 font-sans leading-relaxed shadow-inner"
+                                  placeholder="在此修改英文聽寫內容..."
+                                />
+                                <div className="flex items-center gap-1.5 pt-0.5">
+                                  <button
+                                    onClick={() => handleSaveSegmentEdit(entry.id)}
+                                    className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[9px] rounded-md transition-all flex items-center gap-1 shadow-sm"
+                                  >
+                                    <Check className="w-2.5 h-2.5" />
+                                    儲存並比對翻譯
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setEditingId(null);
+                                      setEditingText('');
+                                    }}
+                                    className="px-2 py-1 bg-zinc-100 hover:bg-zinc-200 text-zinc-650 font-bold text-[9px] rounded-md transition-all"
+                                  >
+                                    取消
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-zinc-700 text-[13.5px] leading-relaxed font-normal">{entry.original}</p>
+                            )}
+                          </div>
+
+                          {/* Comfortable: Chinese translation card */}
+                          <div className="flex flex-col justify-between space-y-1 border-t md:border-t-0 md:border-l border-zinc-100 pt-2 md:pt-0 md:pl-3">
+                            <div>
+                              <div className="flex items-center justify-between text-[9px] text-zinc-400 font-mono mb-0.5">
+                                <span className="font-bold text-indigo-600 uppercase tracking-widest">Translation (TW)</span>
+                                {entry.translated && (
+                                  <button 
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(entry.translated!);
+                                      addToast('複製成功！', 'success');
+                                    }}
+                                    className="p-1 hover:text-indigo-600 transition-colors opacity-40 group-hover/entry:opacity-100"
+                                    title="複製翻譯結果"
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </div>
+                              {entry.translated ? (
+                                <p className="text-zinc-900 text-[13.5px] leading-relaxed font-bold">{entry.translated}</p>
+                              ) : (
+                                <div className="flex items-center gap-1.5 text-indigo-400 font-medium py-1">
+                                  <div className="flex gap-1">
+                                    <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                                    <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                                    <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></span>
+                                  </div>
+                                  <span className="text-[11.5px] italic">法醫級精準比對翻譯中...</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </motion.div>
+                  );
+                })}
               </div>
             )}
           </div>
+
+          {/* Floating Scroll to Top button */}
+          <AnimatePresence>
+            {showScrollTop && (
+              <motion.button
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 15 }}
+                onClick={scrollToTop}
+                className={cn(
+                  "absolute bottom-4 right-4 z-50 px-3.5 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 shadow-lg transition-all border",
+                  hasNewItems 
+                    ? "bg-indigo-600 border-indigo-700 text-white hover:bg-indigo-700 shadow-indigo-100 animate-bounce" 
+                    : "bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50 shadow-zinc-100/50"
+                )}
+                title="回到最頂端閱讀新內容"
+              >
+                <ArrowUp className="w-3.5 h-3.5" />
+                {hasNewItems ? "✨ 回到頂端 (有新譯文)" : "回到最頂端"}
+              </motion.button>
+            )}
+          </AnimatePresence>
         </section>
 
       </main>
@@ -999,7 +1260,7 @@ export default function App() {
                   <Sliders className="w-5 h-5 text-indigo-600 animate-pulse" />
                   <div>
                     <h2 className="text-md font-extrabold text-zinc-800">系統即時翻譯與 AI 引擎設定</h2>
-                    <p className="text-[10px] text-zinc-400 mt-0.5 font-normal">配置課程描述、預設口音、自訂金鑰和多雲模型</p>
+                    <p className="text-[10px] text-zinc-400 mt-0.5 font-normal">配置預設語音口音、自訂 API 金鑰和模型運算核心</p>
                   </div>
                 </div>
                 <button 
@@ -1020,7 +1281,7 @@ export default function App() {
                     settingsTab === 'speech' ? "bg-white text-indigo-600 shadow-sm border border-zinc-200/50" : "text-zinc-500 hover:text-zinc-700"
                   )}
                 >
-                  🎙️ 課程與大綱背景
+                  🎙️ 預設語音口音
                 </button>
                 <button
                   type="button"
@@ -1039,46 +1300,6 @@ export default function App() {
                 
                 {settingsTab === 'speech' ? (
                   <div className="space-y-4">
-                    {/* Session outline background */}
-                    <div>
-                      <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-                        <Zap className="w-3.5 h-3.5 text-indigo-500" />
-                        課堂大綱與背景主題 (Session Context Memory)
-                      </label>
-                      <textarea
-                        placeholder="例如：紐西蘭教授開設的經濟學、軟體開發敏捷會議、日常咖啡廳對話..."
-                        value={sessionContext}
-                        onChange={(e) => setSessionContext(e.target.value)}
-                        className="w-full h-24 p-3 bg-zinc-50/50 border border-zinc-200 rounded-2xl text-xs outline-none focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 transition-all resize-none shadow-inner"
-                      />
-                      
-                      {/* Presets Selection */}
-                      <div className="mt-3">
-                        <span className="block text-[10px] font-bold text-zinc-400 mb-1.5 uppercase">快速選擇大綱與背景預設</span>
-                        <div className="flex flex-wrap gap-1.5">
-                          {CONTEXT_PRESETS.map((preset) => (
-                            <button
-                              key={preset.id}
-                              type="button"
-                              onClick={() => {
-                                setSessionContext(preset.text);
-                                addToast(`載入預設背景：${preset.label}`, 'success');
-                              }}
-                              className={cn(
-                                "text-[11px] px-3 py-1.5 rounded-full border font-bold flex items-center gap-1 transition-all",
-                                sessionContext === preset.text
-                                  ? "bg-indigo-600 text-white border-indigo-700 shadow-sm"
-                                  : "bg-zinc-50 border-zinc-200 text-zinc-600 hover:bg-zinc-100/80"
-                              )}
-                            >
-                              <span>{preset.icon}</span>
-                              <span>{preset.label}</span>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-
                     {/* Target dialiect accent manually selecting */}
                     <div>
                       <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">
@@ -1252,6 +1473,205 @@ export default function App() {
                   onClick={() => {
                     setIsSettingsOpen(false);
                     addToast('設定儲存成功', 'success');
+                  }}
+                  className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-100 transition-colors"
+                >
+                  確認保存設定
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* SESSION MEMORY SETTINGS MODAL / DIALOG */}
+      <AnimatePresence>
+        {isMemoryOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] bg-zinc-950/40 backdrop-blur-sm flex items-center justify-center p-4 md:p-8"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              className="bg-white w-full max-w-xl rounded-3xl shadow-2xl flex flex-col overflow-hidden max-h-[90vh]"
+            >
+              {/* Header */}
+              <div className="flex-none p-6 border-b border-zinc-100 flex items-center justify-between bg-zinc-50/50">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 bg-indigo-50 rounded-xl flex items-center justify-center border border-indigo-100">
+                    <Brain className="w-4 h-4 text-indigo-600" />
+                  </div>
+                  <div>
+                    <h2 className="text-sm font-extrabold text-zinc-805">課堂與對話主題記憶大綱設定</h2>
+                    <p className="text-[10px] text-zinc-400 font-normal mt-0.5">配置英中縮音與專業學術/科技名詞對照記憶（100% 獨立自適應）</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsMemoryOpen(false)}
+                  className="p-1.5 text-zinc-400 hover:text-zinc-600 rounded-xl hover:bg-zinc-100 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Scrollable Body */}
+              <div className="flex-1 p-6 overflow-y-auto space-y-5 custom-scrollbar bg-white">
+                
+                {/* Live AI Recommendation Panel */}
+                {(() => {
+                  const fullSpeechText = history.map(h => h.original).join(' ') + ' ' + interimTranscript;
+                  const { recommendedId, matchedWords } = analyzeSessionMemory(fullSpeechText);
+                  const recPreset = CONTEXT_PRESETS.find(p => p.id === recommendedId);
+                  const currentPreset = CONTEXT_PRESETS.find(p => p.text === sessionContext);
+                  
+                  if (!fullSpeechText.trim()) {
+                    return (
+                      <div className="bg-zinc-50 border border-zinc-100 p-4 rounded-2xl flex items-center gap-3">
+                        <span className="text-lg">✨</span>
+                        <p className="text-[11px] text-zinc-500 leading-normal">
+                          <strong>系統探針：</strong> 正在開啟麥克風聽寫等待接收。當您開始說話或貼上文本，AI 將自動辨識內容特徵並在此推薦最適切的口音名詞記憶！
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  if (recPreset) {
+                    const isAlreadySelected = currentPreset && currentPreset.id === recommendedId;
+                    return (
+                      <div className={cn(
+                        "p-4 rounded-2xl border flex flex-col gap-2.5 transition-all",
+                        isAlreadySelected 
+                          ? "bg-emerald-50/50 border-emerald-200/60" 
+                          : "bg-indigo-50/75 border-indigo-200/60"
+                      )}>
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-black uppercase tracking-wider text-indigo-700 flex items-center gap-1">
+                            <Sparkles className="w-3.5 h-3.5 animate-pulse" />
+                            智慧推薦特徵 (Smart Recommendation)
+                          </span>
+                          <span className={cn(
+                            "text-[9px] px-2 py-0.5 rounded-full font-bold border",
+                            isAlreadySelected 
+                              ? "bg-emerald-100/60 text-emerald-700 border-emerald-200" 
+                              : "bg-indigo-100 text-indigo-700 border-indigo-200"
+                          )}>
+                            {isAlreadySelected ? "目前使用中" : "強烈推薦套用"}
+                          </span>
+                        </div>
+                        
+                        <div>
+                          <p className="text-xs text-zinc-705 leading-relaxed font-semibold">
+                            系統在累積的英語對白中，比對到了「<strong>{matchedWords.join(', ')}</strong>」等關鍵術語。
+                          </p>
+                          <p className="text-[11px] text-zinc-400 mt-1 leading-normal">
+                            建議口音與專業名詞記憶：<strong>{recPreset.icon} {recPreset.label}</strong>（{recPreset.text.substring(0, 50)}...）
+                          </p>
+                        </div>
+
+                        {!isAlreadySelected && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSessionContext(recPreset.text);
+                              addToast(`已成功套用系統推薦：${recPreset.label}`, 'success');
+                            }}
+                            className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11px] py-2 px-4 rounded-xl transition-all shadow-md shadow-indigo-100 flex items-center justify-center gap-1.5 self-start"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>一鍵套用此推薦記憶</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* Preset List Selection */}
+                <div>
+                  <label className="block text-xs font-bold text-zinc-450 uppercase tracking-wider mb-2.5">
+                    快速選擇內建對白主題記憶模組 (Standard Memories)
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {CONTEXT_PRESETS.map((preset) => {
+                      const isSelected = sessionContext === preset.text;
+                      return (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => {
+                            setSessionContext(preset.text);
+                            addToast(`已切換至主題背景：${preset.label}`, 'success');
+                          }}
+                          className={cn(
+                            "p-3 rounded-2xl border text-left transition-all flex items-start gap-3 relative overflow-hidden group/item",
+                            isSelected 
+                              ? "bg-indigo-50 border-indigo-500 ring-2 ring-indigo-500/10" 
+                              : "bg-zinc-50 hover:bg-zinc-100/50 border-zinc-200"
+                          )}
+                        >
+                          <span className="text-2xl leading-none">{preset.icon}</span>
+                          <div className="space-y-0.5">
+                            <span className="text-xs font-bold text-zinc-800 flex items-center gap-1.5">
+                              {preset.label}
+                            </span>
+                            <p className="text-[10px] text-zinc-500 leading-relaxed font-normal line-clamp-2">
+                              {preset.text}
+                            </p>
+                          </div>
+                          {isSelected && (
+                            <div className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-indigo-600 flex items-center justify-center">
+                              <Check className="w-2.5 h-2.5 text-white" />
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="h-px bg-zinc-100" />
+
+                {/* Customized text box */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-bold text-zinc-450 uppercase tracking-wider">
+                      ✍️ 自訂獨立大綱與背景名詞記憶段落 (Custom Memory)
+                    </label>
+                    <button
+                      onClick={() => {
+                        setSessionContext('');
+                        addToast('大綱背景記憶已完整擦除', 'info');
+                      }}
+                      className="text-[9px] font-bold text-zinc-400 hover:text-red-500 transition-colors uppercase"
+                    >
+                      清空記憶
+                    </button>
+                  </div>
+                  <textarea
+                    placeholder="在此貼上或自由編寫自訂專屬課堂/會議大綱背景。例如：特定專有名詞縮讀對照、講者個人背景引言、或是期待翻譯時加強特定用詞等..."
+                    value={sessionContext}
+                    onChange={(e) => setSessionContext(e.target.value)}
+                    className="w-full h-28 p-3.5 bg-zinc-50 border border-zinc-200 rounded-2xl text-xs outline-none focus:bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all font-sans leading-relaxed shadow-inner placeholder:text-zinc-450"
+                  />
+                  <span className="block text-[10px] text-zinc-400 mt-1 leading-normal">
+                    💡 提示：在上方自訂或選擇好背景大綱後，AI 會自動在每次接收錄音時，將該大綱載入至語意神經網絡中，這能有效提高縮語、口音特色以及在特定情境下的名詞精準比對深度。
+                  </span>
+                </div>
+
+              </div>
+
+              {/* Footer */}
+              <div className="flex-none p-4 bg-zinc-50 border-t border-zinc-100 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMemoryOpen(false);
+                    addToast('大綱記憶配置成功', 'success');
                   }}
                   className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-100 transition-colors"
                 >
