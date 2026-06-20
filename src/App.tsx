@@ -1245,7 +1245,7 @@ export default function App() {
                 onClick={() => setRecognitionMode('whisper')}
                 className={cn(
                   "flex-1 px-2 py-1.5 rounded-lg flex items-center justify-center gap-1 transition-all",
-                  recognitionMode === 'whisper' ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                  recognitionMode === 'whisper' ? "bg-white text-emerald-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
                 )}
               >
                 🎯 高精準
