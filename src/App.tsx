@@ -1220,7 +1220,9 @@ export default function App() {
               </div>
               <span className={cn(
                 "text-[9px] px-2 py-0.5 rounded-full font-bold",
-                isRecording ? "bg-red-50 text-red-600" : "bg-zinc-100 text-zinc-500"
+                isRecording
+                  ? (recognitionMode === 'whisper' ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600")
+                  : "bg-zinc-100 text-zinc-500"
               )}>
                 {isRecording ? "正在接收..." : "錄音閒置"}
               </span>
@@ -1262,7 +1264,7 @@ export default function App() {
                   <span>模型下載中…首次較久請稍候</span><span>{whisperProgress}%</span>
                 </div>
                 <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${whisperProgress}%` }} />
+                  <div className="h-full bg-emerald-600 transition-all duration-300" style={{ width: `${whisperProgress}%` }} />
                 </div>
               </div>
             )}
@@ -1298,7 +1300,9 @@ export default function App() {
                       ? "bg-zinc-200 text-zinc-400 border-zinc-200 cursor-not-allowed"
                       : isRecording
                         ? "bg-red-500 hover:bg-red-600 text-white border-red-600 shadow-md shadow-red-100"
-                        : "bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-700 shadow-lg shadow-indigo-100"
+                        : recognitionMode === 'whisper'
+                          ? "bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-700 shadow-lg shadow-emerald-100"
+                          : "bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-700 shadow-lg shadow-indigo-100"
                   )}
                 >
                   {whisperBusy ? (
