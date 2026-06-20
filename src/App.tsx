@@ -198,6 +198,9 @@ export default function App() {
   // True while the user wants continuous recording — lets us auto-restart the
   // Web Speech API when it ends on its own (silence/timeout) instead of pausing.
   const shouldKeepRecordingRef = useRef(false);
+  // Latest un-finalized text; preserved across auto-restarts so the half-spoken
+  // sentence at a cut-off isn't dropped.
+  const lastInterimRef = useRef('');
   const [interimTranscript, setInterimTranscript] = useState('');
   const [selectedLang, setSelectedLang] = useState('en-US');
 
@@ -546,6 +549,12 @@ export default function App() {
     }
   };
 
+  // Keep a live reference to translateSegment so the speech-recognition effect
+  // (which only re-creates on language change) always uses the current AI
+  // settings instead of a stale snapshot.
+  const translateSegmentRef = useRef(translateSegment);
+  useEffect(() => { translateSegmentRef.current = translateSegment; });
+
   // Initialize Speech Recognition
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -554,6 +563,15 @@ export default function App() {
       recognition.continuous = true;
       recognition.interimResults = true;
       recognition.lang = selectedLang;
+
+      // Push a finished chunk into the timeline and translate it.
+      const commitSegment = (text: string) => {
+        const clean = text.trim();
+        if (!clean) return;
+        const segmentId = Math.random().toString(36).substring(7);
+        setHistory(prev => [{ id: segmentId, original: clean, timestamp: Date.now() }, ...prev]);
+        translateSegmentRef.current(clean, segmentId);
+      };
 
       recognition.onstart = () => {
         isActualRecordingRef.current = true;
@@ -574,16 +592,10 @@ export default function App() {
         }
 
         if (finalText) {
-          const segmentId = Math.random().toString(36).substring(7);
-          const newEntry = {
-            id: segmentId,
-            original: finalText.trim(),
-            timestamp: Date.now()
-          };
-          
-          setHistory(prev => [newEntry, ...prev]);
-          translateSegment(finalText, segmentId);
+          commitSegment(finalText);
         }
+        // Remember the still-unfinalized tail so it survives an auto-restart.
+        lastInterimRef.current = interimText;
         setInterimTranscript(interimText);
       };
 
@@ -614,6 +626,12 @@ export default function App() {
       recognition.onend = () => {
         isActualRecordingRef.current = false;
         setInterimTranscript('');
+        // If the session ended mid-sentence, the un-finalized tail would be lost
+        // — commit it so we don't drop those words.
+        if (lastInterimRef.current.trim()) {
+          commitSegment(lastInterimRef.current);
+          lastInterimRef.current = '';
+        }
         // The API often ends on its own after a pause or ~60s. If the user still
         // wants to record, restart it so it doesn't silently stop mid-session.
         if (shouldKeepRecordingRef.current) {
