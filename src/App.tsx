@@ -124,6 +124,41 @@ interface AISettings {
 const OPENAI_BASE = import.meta.env.PROD ? 'https://api.openai.com' : '/api/openai';
 const ANTHROPIC_BASE = import.meta.env.PROD ? 'https://api.anthropic.com' : '/api/anthropic';
 
+// ===== In-browser Whisper (high-accuracy, accent-robust ASR) =====
+const WHISPER_MODEL = 'Xenova/whisper-base';        // ~145MB, good accent quality
+const WHISPER_SAMPLE_RATE = 16000;                  // Whisper expects 16kHz mono
+
+// Combine captured Float32 frames into one buffer.
+const concatFloat32 = (chunks: Float32Array[]): Float32Array => {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Float32Array(total);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+};
+
+// Linear-resample mic audio down to 16kHz mono for Whisper.
+const resampleTo16k = (input: Float32Array, inputRate: number): Float32Array => {
+  if (inputRate === WHISPER_SAMPLE_RATE) return input;
+  const ratio = inputRate / WHISPER_SAMPLE_RATE;
+  const newLen = Math.max(1, Math.round(input.length / ratio));
+  const out = new Float32Array(newLen);
+  for (let i = 0; i < newLen; i++) {
+    const idx = i * ratio;
+    const i0 = Math.floor(idx);
+    const i1 = Math.min(i0 + 1, input.length - 1);
+    out[i] = input[i0] + (input[i1] - input[i0]) * (idx - i0);
+  }
+  return out;
+};
+
+const frameRms = (frame: Float32Array): number => {
+  let sum = 0;
+  for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
+  return Math.sqrt(sum / frame.length);
+};
+
 // CORS-safe API fetching helper for OpenAI
 const callOpenAI = async (apiKey: string, model: string, text: string, systemInstruction: string) => {
   const url = `${OPENAI_BASE}/v1/chat/completions`;
@@ -263,6 +298,24 @@ export default function App() {
   const [autoSwitchAccent, setAutoSwitchAccent] = useState<boolean>(
     () => localStorage.getItem('swift_auto_switch_accent') !== 'false'
   );
+
+  // Recognition engine: 'live' = browser Web Speech (instant), 'whisper' = in-browser Whisper (accurate).
+  const [recognitionMode, setRecognitionMode] = useState<'live' | 'whisper'>(
+    () => (localStorage.getItem('swift_recognition_mode') === 'whisper' ? 'whisper' : 'live')
+  );
+  const [whisperState, setWhisperState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [whisperProgress, setWhisperProgress] = useState(0);
+
+  const whisperWorkerRef = useRef<Worker | null>(null);
+  const whisperReadyRef = useRef(false);
+  const progressByFileRef = useRef<Record<string, { loaded: number; total: number }>>({});
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioNodesRef = useRef<{ source: MediaStreamAudioSourceNode; processor: ScriptProcessorNode } | null>(null);
+  const whisperBufRef = useRef<Float32Array[]>([]);
+  const whisperHasSpeechRef = useRef(false);
+  const whisperLastVoiceRef = useRef(0);
+  const whisperJobRef = useRef(0);
 
   // Resizable left panel width (px), only used in the wide horizontal layout.
   const [leftWidth, setLeftWidth] = useState<number>(() => {
@@ -571,6 +624,147 @@ export default function App() {
   const translateSegmentRef = useRef(translateSegment);
   useEffect(() => { translateSegmentRef.current = translateSegment; });
 
+  useEffect(() => {
+    localStorage.setItem('swift_recognition_mode', recognitionMode);
+  }, [recognitionMode]);
+
+  // Push a finished transcript chunk into the timeline and translate it.
+  // Shared by both the Web Speech and Whisper engines.
+  const commitSegment = useCallback((text: string) => {
+    const clean = text.trim();
+    if (!clean) return;
+    const segmentId = Math.random().toString(36).substring(7);
+    setHistory(prev => [{ id: segmentId, original: clean, timestamp: Date.now() }, ...prev]);
+    translateSegmentRef.current(clean, segmentId);
+  }, []);
+
+  // ===== In-browser Whisper engine =====
+  const ensureWhisperWorker = useCallback(() => {
+    if (whisperWorkerRef.current) return whisperWorkerRef.current;
+    const worker = new Worker(new URL('./whisperWorker.ts', import.meta.url), { type: 'module' });
+    worker.onmessage = (e: MessageEvent) => {
+      const msg = e.data || {};
+      if (msg.type === 'progress') {
+        const d = msg.data || {};
+        if (d.status === 'progress' && d.file && typeof d.total === 'number') {
+          progressByFileRef.current[d.file] = { loaded: d.loaded || 0, total: d.total || 0 };
+          let loaded = 0, total = 0;
+          for (const k in progressByFileRef.current) {
+            loaded += progressByFileRef.current[k].loaded;
+            total += progressByFileRef.current[k].total;
+          }
+          if (total > 0) setWhisperProgress(Math.min(99, Math.round((loaded / total) * 100)));
+        }
+      } else if (msg.type === 'ready') {
+        whisperReadyRef.current = true;
+        setWhisperProgress(100);
+        setWhisperState('ready');
+        addToast('🎯 高精準模式就緒（Whisper 已載入）', 'success');
+      } else if (msg.type === 'error') {
+        whisperReadyRef.current = false;
+        setWhisperState('error');
+        addToast(`Whisper 載入失敗：${msg.error || '未知錯誤'}`, 'error');
+      } else if (msg.type === 'result') {
+        if (msg.text) commitSegment(msg.text);
+      }
+    };
+    whisperWorkerRef.current = worker;
+    return worker;
+  }, [addToast, commitSegment]);
+
+  const loadWhisperModel = useCallback(() => {
+    if (whisperReadyRef.current) { setWhisperState('ready'); return; }
+    const worker = ensureWhisperWorker();
+    progressByFileRef.current = {};
+    setWhisperProgress(0);
+    setWhisperState('loading');
+    const device = (navigator as any).gpu ? 'webgpu' : 'wasm';
+    worker.postMessage({ type: 'load', model: WHISPER_MODEL, device });
+  }, [ensureWhisperWorker]);
+
+  // Cut the current utterance buffer and send it to Whisper.
+  const flushWhisperUtterance = useCallback(() => {
+    const chunks = whisperBufRef.current;
+    whisperBufRef.current = [];
+    whisperHasSpeechRef.current = false;
+    if (!chunks.length || !audioCtxRef.current || !whisperReadyRef.current) return;
+    const merged = concatFloat32(chunks);
+    const audio = resampleTo16k(merged, audioCtxRef.current.sampleRate);
+    if (audio.length < WHISPER_SAMPLE_RATE * 0.3) return; // ignore <0.3s blips
+    const id = ++whisperJobRef.current;
+    const lang = selectedLang.startsWith('en') ? 'english' : 'english';
+    whisperWorkerRef.current?.postMessage({ type: 'transcribe', id, audio, language: lang }, [audio.buffer]);
+  }, [selectedLang]);
+
+  const stopWhisperRecording = useCallback(() => {
+    shouldKeepRecordingRef.current = false;
+    isActualRecordingRef.current = false;
+    setIsRecording(false);
+    setInterimTranscript('');
+    if (audioNodesRef.current) {
+      try { audioNodesRef.current.processor.disconnect(); } catch {}
+      try { audioNodesRef.current.source.disconnect(); } catch {}
+      audioNodesRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      mediaStreamRef.current = null;
+    }
+    // flush any trailing speech before tearing down
+    flushWhisperUtterance();
+    if (audioCtxRef.current) {
+      try { audioCtxRef.current.close(); } catch {}
+      audioCtxRef.current = null;
+    }
+  }, [flushWhisperUtterance]);
+
+  const startWhisperRecording = useCallback(async () => {
+    if (!whisperReadyRef.current) {
+      addToast('Whisper 尚未載入完成，請稍候片刻再開始。', 'info');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      audioNodesRef.current = { source, processor };
+
+      whisperBufRef.current = [];
+      whisperHasSpeechRef.current = false;
+      whisperLastVoiceRef.current = performance.now();
+
+      processor.onaudioprocess = (ev: AudioProcessingEvent) => {
+        const input = ev.inputBuffer.getChannelData(0);
+        whisperBufRef.current.push(new Float32Array(input));
+        const now = performance.now();
+        const loud = frameRms(input) > 0.012;
+        if (loud) { whisperHasSpeechRef.current = true; whisperLastVoiceRef.current = now; }
+
+        const bufferedSamples = whisperBufRef.current.reduce((n, c) => n + c.length, 0);
+        const bufferedSec = bufferedSamples / ctx.sampleRate;
+        const silentFor = now - whisperLastVoiceRef.current;
+        // Cut on a natural pause (after real speech), or force-cut a long run.
+        if ((whisperHasSpeechRef.current && silentFor > 700 && bufferedSec > 0.6) || bufferedSec > 18) {
+          flushWhisperUtterance();
+        }
+      };
+
+      source.connect(processor);
+      processor.connect(ctx.destination);
+      shouldKeepRecordingRef.current = true;
+      isActualRecordingRef.current = true;
+      setIsRecording(true);
+      setSpeechErrorDetected(null);
+    } catch (err) {
+      console.error('Whisper mic error', err);
+      addToast('麥克風啟動失敗，請至下方手動輸入欄。', 'error');
+      stopWhisperRecording();
+    }
+  }, [addToast, flushWhisperUtterance, stopWhisperRecording]);
+
   // Initialize Speech Recognition once. The locale is updated live (see below)
   // rather than by re-creating the instance, which avoids leaking recognizers.
   useEffect(() => {
@@ -580,15 +774,6 @@ export default function App() {
       recognition.continuous = true;
       recognition.interimResults = true;
       recognition.lang = selectedLang;
-
-      // Push a finished chunk into the timeline and translate it.
-      const commitSegment = (text: string) => {
-        const clean = text.trim();
-        if (!clean) return;
-        const segmentId = Math.random().toString(36).substring(7);
-        setHistory(prev => [{ id: segmentId, original: clean, timestamp: Date.now() }, ...prev]);
-        translateSegmentRef.current(clean, segmentId);
-      };
 
       recognition.onstart = () => {
         isActualRecordingRef.current = true;
@@ -683,7 +868,36 @@ export default function App() {
     }
   }, [selectedLang]);
 
+  // Switching engine: stop whatever is recording, and lazily load Whisper.
+  useEffect(() => {
+    if (isActualRecordingRef.current) {
+      shouldKeepRecordingRef.current = false;
+      try { recognitionRef.current?.stop(); } catch {}
+      stopWhisperRecording();
+    }
+    if (recognitionMode === 'whisper' && !whisperReadyRef.current) {
+      loadWhisperModel();
+    }
+  }, [recognitionMode, loadWhisperModel, stopWhisperRecording]);
+
+  // Tear down the Whisper worker and audio graph on unmount.
+  useEffect(() => () => {
+    try { stopWhisperRecording(); } catch {}
+    whisperWorkerRef.current?.terminate();
+    whisperWorkerRef.current = null;
+  }, [stopWhisperRecording]);
+
   const toggleRecording = () => {
+    // High-accuracy mode uses the in-browser Whisper engine instead.
+    if (recognitionMode === 'whisper') {
+      if (isActualRecordingRef.current) {
+        stopWhisperRecording();
+      } else {
+        startWhisperRecording();
+      }
+      return;
+    }
+
     if (!recognitionRef.current) {
       addToast('您的瀏覽器不支援語音辨識功能。推薦使用下方的「手動鍵盤輸入」！');
       return;
@@ -993,6 +1207,53 @@ export default function App() {
               </span>
             </div>
 
+            {/* Recognition engine toggle */}
+            <div className="flex items-center gap-0.5 p-0.5 rounded-xl border border-zinc-200 bg-zinc-100 text-[11px] font-extrabold select-none">
+              <button
+                type="button"
+                onClick={() => setRecognitionMode('live')}
+                className={cn(
+                  "flex-1 px-2 py-1.5 rounded-lg flex items-center justify-center gap-1 transition-all",
+                  recognitionMode === 'live' ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                )}
+              >
+                ⚡ 即時
+              </button>
+              <button
+                type="button"
+                onClick={() => setRecognitionMode('whisper')}
+                className={cn(
+                  "flex-1 px-2 py-1.5 rounded-lg flex items-center justify-center gap-1 transition-all",
+                  recognitionMode === 'whisper' ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                )}
+              >
+                🎯 高精準
+              </button>
+            </div>
+
+            {recognitionMode === 'whisper' && (
+              <p className="text-[10px] text-zinc-400 leading-relaxed">
+                高精準模式在你的瀏覽器本機執行 Whisper（口音更準、音訊不離開裝置）。首次使用需下載模型（約 145MB），之後瀏覽器會快取。
+              </p>
+            )}
+
+            {recognitionMode === 'whisper' && whisperState === 'loading' && (
+              <div className="space-y-1">
+                <div className="flex justify-between text-[10px] font-bold text-zinc-500">
+                  <span>模型下載中…首次較久請稍候</span><span>{whisperProgress}%</span>
+                </div>
+                <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${whisperProgress}%` }} />
+                </div>
+              </div>
+            )}
+
+            {recognitionMode === 'whisper' && whisperState === 'error' && (
+              <button onClick={loadWhisperModel} className="text-[11px] font-bold text-red-600 underline self-start">
+                模型載入失敗，點此重試
+              </button>
+            )}
+
             {/* Kinetic visual wave when recording */}
             {isRecording && (
               <div className="flex items-center justify-center gap-1 py-1.5 bg-zinc-50 rounded-xl border border-zinc-100">
@@ -1005,27 +1266,40 @@ export default function App() {
             )}
 
             {/* Action record toggle button */}
-            <button
-              onClick={toggleRecording}
-              className={cn(
-                "w-full py-4 px-6 rounded-2xl transition-all duration-300 flex items-center justify-center gap-3 font-bold text-sm shadow-sm border",
-                isRecording 
-                  ? "bg-red-500 hover:bg-red-600 text-white border-red-600 shadow-md shadow-red-100" 
-                  : "bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-700 shadow-lg shadow-indigo-100"
-              )}
-            >
-              {isRecording ? (
-                <>
-                  <MicOff className="w-5 h-5 animate-pulse" />
-                  <span>停止聽寫 & 儲存此句</span>
-                </>
-              ) : (
-                <>
-                  <Mic className="w-5 h-5" />
-                  <span>開啟麥克風 開始錄音</span>
-                </>
-              )}
-            </button>
+            {(() => {
+              const whisperBusy = recognitionMode === 'whisper' && whisperState !== 'ready';
+              return (
+                <button
+                  onClick={toggleRecording}
+                  disabled={whisperBusy}
+                  className={cn(
+                    "w-full py-4 px-6 rounded-2xl transition-all duration-300 flex items-center justify-center gap-3 font-bold text-sm shadow-sm border",
+                    whisperBusy
+                      ? "bg-zinc-200 text-zinc-400 border-zinc-200 cursor-not-allowed"
+                      : isRecording
+                        ? "bg-red-500 hover:bg-red-600 text-white border-red-600 shadow-md shadow-red-100"
+                        : "bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-700 shadow-lg shadow-indigo-100"
+                  )}
+                >
+                  {whisperBusy ? (
+                    <>
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                      <span>{whisperState === 'error' ? 'Whisper 載入失敗' : 'Whisper 載入中…'}</span>
+                    </>
+                  ) : isRecording ? (
+                    <>
+                      <MicOff className="w-5 h-5 animate-pulse" />
+                      <span>停止聽寫 & 儲存此句</span>
+                    </>
+                  ) : (
+                    <>
+                      <Mic className="w-5 h-5" />
+                      <span>{recognitionMode === 'whisper' ? '開啟麥克風（高精準）' : '開啟麥克風 開始錄音'}</span>
+                    </>
+                  )}
+                </button>
+              );
+            })()}
 
             {/* Real-time Listening Transcript Section */}
             {(isRecording || interimTranscript) && (
