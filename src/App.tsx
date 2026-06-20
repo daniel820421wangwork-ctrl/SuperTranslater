@@ -1036,14 +1036,35 @@ export default function App() {
             </div>
             
             <div className="flex items-center gap-2">
-              {/* Compact / Comfortable density toggle */}
-              <button
-                onClick={() => setIsCompact(!isCompact)}
-                className="text-[10px] font-extrabold flex items-center gap-1 px-2 py-1 rounded-lg border border-zinc-250 bg-white hover:bg-zinc-50 text-zinc-600 shadow-sm transition-all select-none"
-                title={isCompact ? "切換成舒適卡片模式" : "切換成緊湊高密度模式"}
+              {/* Compact / Comfortable density toggle (segmented control) */}
+              <div
+                className="flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-200 bg-zinc-100 text-[10px] font-extrabold select-none"
+                role="group"
+                aria-label="顯示密度"
               >
-                <span>{isCompact ? "⚡️ 緊湊高密度" : "📖 舒適卡片"}</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setIsCompact(true)}
+                  title="緊湊高密度：每段佔用較少空間，一次看更多"
+                  className={cn(
+                    "px-2 py-1 rounded-md flex items-center gap-1 transition-all",
+                    isCompact ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                  )}
+                >
+                  ⚡ 緊湊
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsCompact(false)}
+                  title="舒適卡片：每段獨立卡片，留白較多較好讀"
+                  className={cn(
+                    "px-2 py-1 rounded-md flex items-center gap-1 transition-all",
+                    !isCompact ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                  )}
+                >
+                  📖 舒適
+                </button>
+              </div>
               
               <span className="text-[10px] font-mono text-zinc-400 bg-zinc-100 px-2.5 py-1.5 rounded-lg font-bold">
                 共計：{history.length} 個片段
