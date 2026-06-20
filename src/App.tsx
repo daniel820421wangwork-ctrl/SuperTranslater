@@ -5,7 +5,7 @@ import {
   Languages, Copy, Check, Info, Zap, Trash2, 
   ArrowRightLeft, Mic, MicOff, XCircle, StopCircle, 
   FileText, X, Sparkles, ListChecks, Sliders, Settings, Key, Globe, Brain, RefreshCw,
-  Edit, ArrowUp
+  Edit, ArrowUp, Menu, GripVertical
 } from 'lucide-react';
 import { cn } from './lib/utils';
 
@@ -255,6 +255,16 @@ export default function App() {
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [hasNewItems, setHasNewItems] = useState(false);
   const [isCompact, setIsCompact] = useState(true);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+
+  // Resizable left panel width (px), only used in the wide horizontal layout.
+  const [leftWidth, setLeftWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('swift_left_panel_width'));
+    return saved >= 300 && saved <= 760 ? saved : 420;
+  });
+  const [isWideLayout, setIsWideLayout] = useState<boolean>(
+    () => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches
+  );
 
   const translationIdRef = useRef(0);
   const recognitionRef = useRef<any>(null);
@@ -264,6 +274,48 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('swift_transcript_ai_settings_v2', JSON.stringify(aiSettings));
   }, [aiSettings]);
+
+  // Track whether we're in the side-by-side (lg) layout so the drag handle
+  // and fixed pixel width only apply there; on mobile it stacks vertically.
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)');
+    const onChange = (e: MediaQueryListEvent) => setIsWideLayout(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('swift_left_panel_width', String(leftWidth));
+  }, [leftWidth]);
+
+  // Drag the divider to resize the left console panel.
+  const startPanelDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = leftWidth;
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.min(760, Math.max(300, startWidth + (ev.clientX - startX)));
+      setLeftWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [leftWidth]);
+
+  // Close the header menu on Escape.
+  useEffect(() => {
+    if (!isMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setIsMenuOpen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isMenuOpen]);
 
   const getGeminiClient = useCallback((customKey?: string) => {
     const key = customKey || (process.env.GEMINI_API_KEY as string);
@@ -748,8 +800,8 @@ export default function App() {
         </AnimatePresence>
       </div>
 
-      {/* Top Application Header */}
-      <header className="bg-white border-b border-zinc-200 px-6 py-4 shadow-sm z-40 flex-none">
+      {/* Top Application Header (slim bar + hamburger menu) */}
+      <header className="bg-white border-b border-zinc-200 px-4 sm:px-6 py-3 shadow-sm z-40 flex-none relative">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-100 flex-shrink-0">
@@ -762,83 +814,114 @@ export default function App() {
               <p className="text-[10px] text-zinc-400 font-medium">即時法醫級語音翻譯與口音特徵比對器</p>
             </div>
           </div>
-          
-          <div className="flex items-center gap-2">
-            {/* Quick Provider & Model switcher (always visible) */}
-            <div className="flex items-center gap-1.5 mr-1">
-              <span className="hidden sm:inline-block w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
-              <select
-                value={aiSettings.provider}
-                onChange={(e) => setAiSettings(prev => ({ ...prev, provider: e.target.value as AISettings['provider'] }))}
-                title="切換 AI 平台"
-                className="py-2 px-2 bg-zinc-100 border border-zinc-200 rounded-xl text-xs font-bold text-indigo-700 outline-none focus:border-indigo-500 cursor-pointer hover:bg-zinc-200 transition-all"
-              >
-                <option value="openai">OpenAI</option>
-                <option value="claude">Claude</option>
-                <option value="gemini">Gemini</option>
-              </select>
-              <select
-                value={aiSettings.provider === 'gemini' ? aiSettings.geminiModel :
-                       aiSettings.provider === 'openai' ? aiSettings.openaiModel : aiSettings.claudeModel}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setAiSettings(prev => ({
-                    ...prev,
-                    ...(prev.provider === 'gemini' ? { geminiModel: v } :
-                        prev.provider === 'openai' ? { openaiModel: v } : { claudeModel: v }),
-                  }));
-                }}
-                title="切換模型"
-                className="max-w-[160px] py-2 px-2 bg-zinc-100 border border-zinc-200 rounded-xl text-xs font-semibold text-zinc-700 outline-none focus:border-indigo-500 cursor-pointer hover:bg-zinc-200 transition-all truncate"
-              >
-                {PROVIDER_MODELS[aiSettings.provider].map((m) => (
-                  <option key={m.value} value={m.value}>{m.label}</option>
-                ))}
-              </select>
-            </div>
 
-            {/* Menu Actions */}
-            <button 
-              onClick={() => setIsMemoryOpen(true)}
-              className="px-3.5 py-2 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 hover:text-indigo-850 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 border border-indigo-100"
-              title="配置口音學術名詞、自訂課堂或會議大綱背景記憶"
-            >
-              <Brain className="w-3.5 h-3.5 text-indigo-600" />
-              <span>記憶設定</span>
-            </button>
-            <button 
-              onClick={() => setIsSettingsOpen(true)}
-              className="px-3.5 py-2 text-zinc-600 bg-zinc-100 hover:bg-zinc-200 hover:text-indigo-600 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 border border-zinc-200/50"
-              title="配置自訂 API 金鑰與模型運算核心"
-            >
-              <Settings className="w-3.5 h-3.5" />
-              <span>設定</span>
-            </button>
-            <button 
-              onClick={() => setIsFullViewOpen(true)}
-              className="px-3.5 py-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-semibold text-xs rounded-xl transition-all flex items-center gap-1.5 border border-indigo-100"
-              title="開啓會議全文中英逐字稿及 AI 重點摘要"
-            >
-              <FileText className="w-3.5 h-3.5" />
-              <span>整頁整理</span>
-            </button>
-            <button 
-              onClick={handleClear}
-              className="p-2 text-zinc-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
-              title="清除目前所有錄音歷史與快取記錄"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          </div>
+          {/* Hamburger trigger */}
+          <button
+            onClick={() => setIsMenuOpen((v) => !v)}
+            aria-label="開啟選單"
+            aria-expanded={isMenuOpen}
+            className={cn(
+              "flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-bold transition-all",
+              isMenuOpen
+                ? "bg-indigo-600 border-indigo-700 text-white shadow-md"
+                : "bg-zinc-100 border-zinc-200 text-zinc-700 hover:bg-zinc-200"
+            )}
+          >
+            {isMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+            <span className="hidden sm:inline">選單</span>
+          </button>
         </div>
+
+        {/* Dropdown menu — all header controls live here */}
+        <AnimatePresence>
+          {isMenuOpen && (
+            <>
+              {/* click-away backdrop */}
+              <div className="fixed inset-0 z-40" onClick={() => setIsMenuOpen(false)} />
+              <motion.div
+                initial={{ opacity: 0, y: -8, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -8, scale: 0.98 }}
+                transition={{ duration: 0.15 }}
+                className="absolute right-4 sm:right-6 top-full mt-2 w-[min(92vw,320px)] bg-white border border-zinc-200 rounded-2xl shadow-2xl z-50 p-4 flex flex-col gap-4"
+              >
+                {/* Provider + model */}
+                <div className="flex flex-col gap-2">
+                  <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500" /> AI 引擎與模型
+                  </label>
+                  <select
+                    value={aiSettings.provider}
+                    onChange={(e) => setAiSettings(prev => ({ ...prev, provider: e.target.value as AISettings['provider'] }))}
+                    className="w-full py-2.5 px-3 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-bold text-indigo-700 outline-none focus:border-indigo-500 cursor-pointer hover:bg-zinc-100 transition-all"
+                  >
+                    <option value="openai">OpenAI</option>
+                    <option value="claude">Claude</option>
+                    <option value="gemini">Gemini</option>
+                  </select>
+                  <select
+                    value={aiSettings.provider === 'gemini' ? aiSettings.geminiModel :
+                           aiSettings.provider === 'openai' ? aiSettings.openaiModel : aiSettings.claudeModel}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setAiSettings(prev => ({
+                        ...prev,
+                        ...(prev.provider === 'gemini' ? { geminiModel: v } :
+                            prev.provider === 'openai' ? { openaiModel: v } : { claudeModel: v }),
+                      }));
+                    }}
+                    className="w-full py-2.5 px-3 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-semibold text-zinc-700 outline-none focus:border-indigo-500 cursor-pointer hover:bg-zinc-100 transition-all"
+                  >
+                    {PROVIDER_MODELS[aiSettings.provider].map((m) => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="h-px bg-zinc-100" />
+
+                {/* Actions */}
+                <div className="flex flex-col gap-1.5">
+                  <button
+                    onClick={() => { setIsMemoryOpen(true); setIsMenuOpen(false); }}
+                    className="w-full px-3 py-2.5 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 font-bold text-xs rounded-xl transition-all flex items-center gap-2 border border-indigo-100"
+                  >
+                    <Brain className="w-4 h-4 text-indigo-600" /> 記憶設定
+                  </button>
+                  <button
+                    onClick={() => { setIsSettingsOpen(true); setIsMenuOpen(false); }}
+                    className="w-full px-3 py-2.5 text-zinc-700 bg-zinc-100 hover:bg-zinc-200 font-bold text-xs rounded-xl transition-all flex items-center gap-2 border border-zinc-200/50"
+                  >
+                    <Settings className="w-4 h-4" /> 設定（API 金鑰）
+                  </button>
+                  <button
+                    onClick={() => { setIsFullViewOpen(true); setIsMenuOpen(false); }}
+                    className="w-full px-3 py-2.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-bold text-xs rounded-xl transition-all flex items-center gap-2 border border-indigo-100"
+                  >
+                    <FileText className="w-4 h-4" /> 整頁整理
+                  </button>
+                  <button
+                    onClick={() => { handleClear(); setIsMenuOpen(false); }}
+                    className="w-full px-3 py-2.5 text-red-500 bg-red-50 hover:bg-red-100 font-bold text-xs rounded-xl transition-all flex items-center gap-2 border border-red-100"
+                  >
+                    <Trash2 className="w-4 h-4" /> 清除歷史紀錄
+                  </button>
+                </div>
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
       </header>
 
       {/* Main Split-Screen Workspace */}
       <main className="flex-1 flex flex-col lg:flex-row overflow-hidden max-w-7xl w-full mx-auto">
-        
-        {/* Left Side: Live Console (控台) */}
-        <section className="w-full lg:w-[420px] shrink-0 border-b lg:border-b-0 lg:border-r border-zinc-200/80 bg-zinc-50/60 p-6 flex flex-col gap-5 overflow-y-auto z-10">
-          
+
+        {/* Left Side: Live Console (控台) — resizable width on wide screens */}
+        <section
+          style={isWideLayout ? { width: leftWidth } : undefined}
+          className="w-full shrink-0 border-b lg:border-b-0 border-zinc-200/80 bg-zinc-50/60 p-6 flex flex-col gap-5 overflow-y-auto z-10"
+        >
+
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 animate-ping" />
             <h2 className="text-xs font-black text-zinc-400 uppercase tracking-widest">
@@ -1021,8 +1104,23 @@ export default function App() {
           )}
         </section>
 
+        {/* Draggable divider — only in the side-by-side layout */}
+        {isWideLayout && (
+          <div
+            onMouseDown={startPanelDrag}
+            role="separator"
+            aria-orientation="vertical"
+            title="拖曳調整左右寬度"
+            className="hidden lg:flex shrink-0 w-1.5 cursor-col-resize group relative items-center justify-center bg-zinc-200/70 hover:bg-indigo-400 transition-colors"
+          >
+            <div className="absolute flex items-center justify-center w-4 h-10 rounded-md bg-white border border-zinc-200 shadow-sm group-hover:border-indigo-400 transition-colors">
+              <GripVertical className="w-3.5 h-3.5 text-zinc-400 group-hover:text-indigo-500" />
+            </div>
+          </div>
+        )}
+
         {/* Right Side: Finalized Timeline (對話時間軸歷史記錄) - Completely Unobstructed! */}
-        <section className="flex-1 bg-white p-3.5 md:p-4.5 flex flex-col overflow-hidden relative">
+        <section className="flex-1 min-w-0 bg-white p-3.5 md:p-4.5 flex flex-col overflow-hidden relative">
           
           <div className="flex-none flex items-center justify-between mb-2 border-b border-zinc-100 pb-2">
             <div>
