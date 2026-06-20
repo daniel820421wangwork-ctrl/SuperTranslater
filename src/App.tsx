@@ -1273,13 +1273,14 @@ export default function App() {
               </button>
             )}
 
-            {/* Kinetic visual wave when recording */}
+            {/* Kinetic visual wave when recording — colour-coded by engine
+                (live = indigo, Whisper high-accuracy = emerald). */}
             {isRecording && (
               <div className="flex items-center justify-center gap-1 py-1.5 bg-zinc-50 rounded-xl border border-zinc-100">
-                <span className="w-1.5 h-4 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.4s]" />
-                <span className="w-1.5 h-6 bg-indigo-600 rounded-full animate-bounce [animation-delay:-0.2s]" />
-                <span className="w-1.5 h-8 bg-indigo-600 rounded-full animate-bounce" />
-                <span className="w-1.5 h-5 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.3s]" />
+                <span className={cn("w-1.5 h-4 rounded-full animate-bounce [animation-delay:-0.4s]", recognitionMode === 'whisper' ? "bg-emerald-500" : "bg-indigo-500")} />
+                <span className={cn("w-1.5 h-6 rounded-full animate-bounce [animation-delay:-0.2s]", recognitionMode === 'whisper' ? "bg-emerald-600" : "bg-indigo-600")} />
+                <span className={cn("w-1.5 h-8 rounded-full animate-bounce", recognitionMode === 'whisper' ? "bg-emerald-600" : "bg-indigo-600")} />
+                <span className={cn("w-1.5 h-5 rounded-full animate-bounce [animation-delay:-0.3s]", recognitionMode === 'whisper' ? "bg-emerald-500" : "bg-indigo-500")} />
                 <span className="w-1.5 h-3 bg-zinc-300 rounded-full animate-bounce [animation-delay:-0.1s]" />
               </div>
             )}
