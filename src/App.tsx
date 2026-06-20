@@ -259,6 +259,10 @@ export default function App() {
   const [hasNewItems, setHasNewItems] = useState(false);
   const [isCompact, setIsCompact] = useState(true);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  // When on, a high-confidence accent detection auto-switches the recognition locale.
+  const [autoSwitchAccent, setAutoSwitchAccent] = useState<boolean>(
+    () => localStorage.getItem('swift_auto_switch_accent') !== 'false'
+  );
 
   // Resizable left panel width (px), only used in the wide horizontal layout.
   const [leftWidth, setLeftWidth] = useState<number>(() => {
@@ -290,6 +294,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('swift_left_panel_width', String(leftWidth));
   }, [leftWidth]);
+
+  useEffect(() => {
+    localStorage.setItem('swift_auto_switch_accent', String(autoSwitchAccent));
+  }, [autoSwitchAccent]);
 
   // Drag the divider to resize the left console panel.
   const startPanelDrag = useCallback((e: React.MouseEvent) => {
@@ -522,14 +530,23 @@ export default function App() {
       if (data.detectedAccentCode && data.detectedAccentCode !== selectedLang) {
         const matchingLang = LANGUAGES.find(l => l.code === data.detectedAccentCode);
         if (matchingLang) {
-          setDetectedAccent({ 
-            code: matchingLang.code, 
+          const confidence = data.confidence || 50;
+          setDetectedAccent({
+            code: matchingLang.code,
             label: matchingLang.label,
             reason: data.reasoning || '語音特徵比對結果',
             wordCount: text.split(' ').length,
             traits: data.profile_traits || [],
-            confidence: data.confidence || 50
+            confidence
           });
+
+          // Closed loop: if we're confident the speaker's accent differs from the
+          // current recognition locale, switch it so the next segment is heard
+          // with a better-matched accent model. Only while actively recording.
+          if (autoSwitchAccent && confidence >= 80 && isActualRecordingRef.current) {
+            setSelectedLang(matchingLang.code);
+            addToast(`偵測到 ${matchingLang.label}（信心 ${confidence}%），已自動切換辨識口音`, 'success');
+          }
         }
       }
       
@@ -550,15 +567,15 @@ export default function App() {
   };
 
   // Keep a live reference to translateSegment so the speech-recognition effect
-  // (which only re-creates on language change) always uses the current AI
-  // settings instead of a stale snapshot.
+  // always uses the current AI settings instead of a stale snapshot.
   const translateSegmentRef = useRef(translateSegment);
   useEffect(() => { translateSegmentRef.current = translateSegment; });
 
-  // Initialize Speech Recognition
+  // Initialize Speech Recognition once. The locale is updated live (see below)
+  // rather than by re-creating the instance, which avoids leaking recognizers.
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRecognition) {
+    if (SpeechRecognition && !recognitionRef.current) {
       const recognition = new SpeechRecognition();
       recognition.continuous = true;
       recognition.interimResults = true;
@@ -652,6 +669,17 @@ export default function App() {
       };
 
       recognitionRef.current = recognition;
+    }
+  }, []);
+
+  // Apply locale changes to the live recognizer. If recording, stop it so onend
+  // auto-restarts a fresh session using the newly selected accent model.
+  useEffect(() => {
+    const rec = recognitionRef.current;
+    if (!rec) return;
+    rec.lang = selectedLang;
+    if (isActualRecordingRef.current) {
+      try { rec.stop(); } catch (e) { console.warn('lang switch restart failed', e); }
     }
   }, [selectedLang]);
 
@@ -1516,6 +1544,31 @@ export default function App() {
                           </button>
                         ))}
                       </div>
+                    </div>
+
+                    {/* Auto-switch recognition accent toggle */}
+                    <div className="flex items-start justify-between gap-3 p-3.5 rounded-2xl border border-zinc-200 bg-zinc-50/60">
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-zinc-700">自動切換辨識口音</p>
+                        <p className="text-[11px] text-zinc-500 leading-relaxed mt-0.5">
+                          錄音中若 AI 以高信心（≥80%）判斷你講的是其他口音，會自動把辨識引擎切到該口音，讓後續更聽得準。
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={autoSwitchAccent}
+                        onClick={() => setAutoSwitchAccent(v => !v)}
+                        className={cn(
+                          "shrink-0 mt-0.5 w-11 h-6 rounded-full p-0.5 transition-colors",
+                          autoSwitchAccent ? "bg-indigo-600" : "bg-zinc-300"
+                        )}
+                      >
+                        <span className={cn(
+                          "block w-5 h-5 rounded-full bg-white shadow transition-transform",
+                          autoSwitchAccent ? "translate-x-5" : "translate-x-0"
+                        )} />
+                      </button>
                     </div>
 
                   </div>
