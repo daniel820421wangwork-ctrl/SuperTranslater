@@ -1320,8 +1320,9 @@ export default function App() {
               );
             })()}
 
-            {/* Real-time Listening Transcript Section */}
-            {(isRecording || interimTranscript) && (
+            {/* Real-time Listening Transcript Section — only the live (Web Speech)
+                engine streams interim words; Whisper transcribes per utterance. */}
+            {recognitionMode === 'live' && (isRecording || interimTranscript) && (
               <div className="mt-3 p-3.5 bg-zinc-50 border border-zinc-200/60 rounded-2xl space-y-2 animate-fade-in">
                 <div className="flex items-center gap-2">
                   <span className="flex h-2 w-2 relative">
@@ -1339,6 +1340,17 @@ export default function App() {
                     <span className="text-zinc-400 animate-pulse">請開始講話，即時轉錄文字會顯示在此處...</span>
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* Whisper has no streaming interim — show a listening hint instead. */}
+            {recognitionMode === 'whisper' && isRecording && (
+              <div className="mt-3 p-3 bg-indigo-50/50 border border-indigo-100 rounded-2xl flex items-center gap-2.5 animate-fade-in">
+                <span className="flex h-2 w-2 relative shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
+                </span>
+                <span className="text-[11px] text-zinc-500 font-medium leading-relaxed">聆聽中…講完一句、停頓約一秒後會自動辨識並翻譯（高精準模式無即時逐字）</span>
               </div>
             )}
           </div>
