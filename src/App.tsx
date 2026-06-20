@@ -124,6 +124,14 @@ interface AISettings {
 const OPENAI_BASE = import.meta.env.PROD ? 'https://api.openai.com' : '/api/openai';
 const ANTHROPIC_BASE = import.meta.env.PROD ? 'https://api.anthropic.com' : '/api/anthropic';
 
+// Selectable Chinese-translation font sizes (px) with short labels.
+const TRANS_FONT_SIZES = [
+  { px: 13, label: '小' },
+  { px: 16, label: '中' },
+  { px: 19, label: '大' },
+  { px: 24, label: '特大' },
+];
+
 // ===== In-browser Whisper (high-accuracy, accent-robust ASR) =====
 const WHISPER_MODEL = 'Xenova/whisper-base';        // ~145MB, good accent quality
 const WHISPER_SAMPLE_RATE = 16000;                  // Whisper expects 16kHz mono
@@ -294,6 +302,11 @@ export default function App() {
   const [hasNewItems, setHasNewItems] = useState(false);
   const [isCompact, setIsCompact] = useState(true);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  // Adjustable Chinese-translation font size (index into TRANS_FONT_SIZES).
+  const [transSizeIdx, setTransSizeIdx] = useState<number>(() => {
+    const n = Number(localStorage.getItem('swift_trans_font_idx'));
+    return Number.isInteger(n) && n >= 0 && n < TRANS_FONT_SIZES.length ? n : 0;
+  });
   // When on, a high-confidence accent detection auto-switches the recognition locale.
   const [autoSwitchAccent, setAutoSwitchAccent] = useState<boolean>(
     () => localStorage.getItem('swift_auto_switch_accent') !== 'false'
@@ -351,6 +364,12 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('swift_auto_switch_accent', String(autoSwitchAccent));
   }, [autoSwitchAccent]);
+
+  useEffect(() => {
+    localStorage.setItem('swift_trans_font_idx', String(transSizeIdx));
+  }, [transSizeIdx]);
+
+  const transFontPx = TRANS_FONT_SIZES[transSizeIdx].px;
 
   // Drag the divider to resize the left console panel.
   const startPanelDrag = useCallback((e: React.MouseEvent) => {
@@ -1483,7 +1502,30 @@ export default function App() {
                   📖 舒適
                 </button>
               </div>
-              
+
+              {/* Chinese translation font size */}
+              <div className="flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-200 bg-zinc-100 select-none" title="調整中文翻譯字級">
+                <button
+                  type="button"
+                  onClick={() => setTransSizeIdx(i => Math.max(0, i - 1))}
+                  disabled={transSizeIdx === 0}
+                  aria-label="縮小翻譯字級"
+                  className="px-1.5 py-1 rounded-md text-[11px] font-extrabold text-zinc-500 hover:text-indigo-600 disabled:opacity-30 transition-colors"
+                >
+                  A−
+                </button>
+                <span className="text-[10px] font-extrabold text-indigo-600 min-w-[1.6rem] text-center">{TRANS_FONT_SIZES[transSizeIdx].label}</span>
+                <button
+                  type="button"
+                  onClick={() => setTransSizeIdx(i => Math.min(TRANS_FONT_SIZES.length - 1, i + 1))}
+                  disabled={transSizeIdx === TRANS_FONT_SIZES.length - 1}
+                  aria-label="放大翻譯字級"
+                  className="px-1.5 py-1 rounded-md text-[14px] font-extrabold text-zinc-500 hover:text-indigo-600 disabled:opacity-30 transition-colors"
+                >
+                  A+
+                </button>
+              </div>
+
               <span className="text-[10px] font-mono text-zinc-400 bg-zinc-100 px-2.5 py-1.5 rounded-lg font-bold">
                 共計：{history.length} 個片段
               </span>
@@ -1592,7 +1634,7 @@ export default function App() {
                           {/* Right column: Chinese translation */}
                           <div className="md:col-span-5 border-t border-dashed border-zinc-100 pt-1.5 md:pt-0 md:border-t-0 md:border-l md:pl-3.5 min-w-0">
                             {entry.translated ? (
-                              <p className="text-zinc-900 text-[13px] leading-relaxed font-bold">{entry.translated}</p>
+                              <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{entry.translated}</p>
                             ) : (
                               <div className="flex items-center gap-1 text-indigo-400 font-medium py-0.5 select-none">
                                 <div className="flex gap-0.5">
@@ -1683,7 +1725,7 @@ export default function App() {
                                 )}
                               </div>
                               {entry.translated ? (
-                                <p className="text-zinc-900 text-[13.5px] leading-relaxed font-bold">{entry.translated}</p>
+                                <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{entry.translated}</p>
                               ) : (
                                 <div className="flex items-center gap-1.5 text-indigo-400 font-medium py-1">
                                   <div className="flex gap-1">
@@ -2289,7 +2331,7 @@ export default function App() {
                           </div>
                           <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr] gap-6">
                             <p className="text-zinc-600 leading-relaxed text-sm">{entry.original}</p>
-                            <p className="text-zinc-900 font-bold leading-relaxed">{entry.translated || '...'}</p>
+                            <p style={{ fontSize: transFontPx }} className="text-zinc-900 font-bold leading-relaxed">{entry.translated || '...'}</p>
                           </div>
                         </div>
                       ))
