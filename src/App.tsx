@@ -198,6 +198,25 @@ const frameRms = (frame: Float32Array): number => {
   return Math.sqrt(sum / frame.length);
 };
 
+// Strip non-speech sound annotations Whisper emits, e.g. [MUSIC], (applause), ♪.
+const cleanTranscript = (raw: string): string =>
+  raw.replace(/\[[^\]]*\]/g, ' ').replace(/\([^)]*\)/g, ' ').replace(/[♪♫]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+// Common Whisper hallucinations on silence/noise that aren't real content.
+const WHISPER_JUNK = new Set([
+  'you', 'thank you', 'thanks', 'thank you very much', 'thanks for watching',
+  'thanks for watching!', 'please subscribe', 'subscribe', 'bye', 'bye bye',
+  'okay', 'ok', 'so', 'music', 'applause', 'silence', 'foreign',
+]);
+const isJunkTranscript = (t: string): boolean => {
+  if (!t) return true;
+  const norm = t.toLowerCase().replace(/[.!?,'"。，！？\s]+/g, ' ').trim();
+  if (WHISPER_JUNK.has(norm)) return true;
+  // drop results with effectively no letters (pure punctuation/symbols)
+  if (t.replace(/[^a-zA-Z一-鿿]/g, '').length <= 1) return true;
+  return false;
+};
+
 // CORS-safe API fetching helper for OpenAI
 const callOpenAI = async (apiKey: string, model: string, text: string, systemInstruction: string) => {
   const url = `${OPENAI_BASE}/v1/chat/completions`;
@@ -349,6 +368,22 @@ export default function App() {
   );
   const [whisperState, setWhisperState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [whisperProgress, setWhisperProgress] = useState(0);
+
+  // User-adjustable Whisper capture parameters (persisted).
+  const numFromLS = (k: string, d: number) => { const n = Number(localStorage.getItem(k)); return Number.isFinite(n) && n > 0 ? n : d; };
+  const [whisperSilenceThresh, setWhisperSilenceThresh] = useState<number>(() => numFromLS('swift_whisper_thresh', 0.012));
+  const [whisperPauseMs, setWhisperPauseMs] = useState<number>(() => numFromLS('swift_whisper_pause', 700));
+  const [whisperMaxSec, setWhisperMaxSec] = useState<number>(() => numFromLS('swift_whisper_maxsec', 18));
+  const [whisperModel, setWhisperModel] = useState<string>(() => localStorage.getItem('swift_whisper_model') || WHISPER_MODEL);
+  // Live refs so the audio callback always reads the current values.
+  const whisperThreshRef = useRef(whisperSilenceThresh);
+  const whisperPauseRef = useRef(whisperPauseMs);
+  const whisperMaxSecRef = useRef(whisperMaxSec);
+  const whisperModelRef = useRef(whisperModel);
+  useEffect(() => { whisperThreshRef.current = whisperSilenceThresh; localStorage.setItem('swift_whisper_thresh', String(whisperSilenceThresh)); }, [whisperSilenceThresh]);
+  useEffect(() => { whisperPauseRef.current = whisperPauseMs; localStorage.setItem('swift_whisper_pause', String(whisperPauseMs)); }, [whisperPauseMs]);
+  useEffect(() => { whisperMaxSecRef.current = whisperMaxSec; localStorage.setItem('swift_whisper_maxsec', String(whisperMaxSec)); }, [whisperMaxSec]);
+  useEffect(() => { whisperModelRef.current = whisperModel; localStorage.setItem('swift_whisper_model', whisperModel); }, [whisperModel]);
 
   const whisperWorkerRef = useRef<Worker | null>(null);
   const whisperReadyRef = useRef(false);
@@ -593,9 +628,10 @@ export default function App() {
   const translateSegment = async (text: string, id?: string): Promise<string> => {
     if (!text.trim()) return '';
     try {
-      const systemInstruction = `You are a professional translator and linguistic expert. 
+      const systemInstruction = `You are a professional translator and linguistic expert.
           ${sessionContext ? `[CONTEXT]: The current conversation is about: "${sessionContext}". Use this to ensure terminology and context are accurate.` : ''}
-          1. Translate English into Traditional Chinese (Taiwan style). 
+          NOTE: The input may be a partial or incomplete fragment captured from live speech. Always translate whatever is given as faithfully as possible (even a sentence fragment); never refuse and never leave "translation" empty.
+          1. Translate English into Traditional Chinese (Taiwan style).
           2. Analyze the input English text like a forensic linguist. Identify clues from:
              - Vocabulary (e.g., NZ/British vs US terms).
              - Syntax/Grammar (detecting non-native patterns like Spanish-English transfer errors).
@@ -843,22 +879,35 @@ export default function App() {
         setWhisperState('error');
         addToast(`Whisper 載入失敗：${msg.error || '未知錯誤'}`, 'error');
       } else if (msg.type === 'result') {
-        if (msg.text) commitSegment(msg.text);
+        const cleaned = cleanTranscript(msg.text || '');
+        if (cleaned && !isJunkTranscript(cleaned)) commitSegment(cleaned);
       }
     };
     whisperWorkerRef.current = worker;
     return worker;
   }, [addToast, commitSegment]);
 
+  const loadedModelRef = useRef('');
   const loadWhisperModel = useCallback(() => {
-    if (whisperReadyRef.current) { setWhisperState('ready'); return; }
+    const model = whisperModelRef.current;
+    if (whisperReadyRef.current && loadedModelRef.current === model) { setWhisperState('ready'); return; }
     const worker = ensureWhisperWorker();
     progressByFileRef.current = {};
     setWhisperProgress(0);
     setWhisperState('loading');
+    loadedModelRef.current = model;
     const device = (navigator as any).gpu ? 'webgpu' : 'wasm';
-    worker.postMessage({ type: 'load', model: WHISPER_MODEL, device });
+    worker.postMessage({ type: 'load', model, device });
   }, [ensureWhisperWorker]);
+
+  // Reload Whisper when the user picks a different model (while in whisper mode).
+  const modelMountRef = useRef(true);
+  useEffect(() => {
+    if (modelMountRef.current) { modelMountRef.current = false; return; }
+    whisperReadyRef.current = false;
+    if (recognitionMode === 'whisper') loadWhisperModel();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [whisperModel]);
 
   // Cut the current utterance buffer and send it to Whisper.
   const flushWhisperUtterance = useCallback(() => {
@@ -932,14 +981,14 @@ export default function App() {
         const input = ev.inputBuffer.getChannelData(0);
         whisperBufRef.current.push(new Float32Array(input));
         const now = performance.now();
-        const loud = frameRms(input) > 0.012;
+        const loud = frameRms(input) > whisperThreshRef.current;
         if (loud) { whisperHasSpeechRef.current = true; whisperLastVoiceRef.current = now; }
 
         const bufferedSamples = whisperBufRef.current.reduce((n, c) => n + c.length, 0);
         const bufferedSec = bufferedSamples / ctx.sampleRate;
         const silentFor = now - whisperLastVoiceRef.current;
         // Cut on a natural pause (after real speech), or force-cut a long run.
-        if ((whisperHasSpeechRef.current && silentFor > 700 && bufferedSec > 0.6) || bufferedSec > 18) {
+        if ((whisperHasSpeechRef.current && silentFor > whisperPauseRef.current && bufferedSec > 0.6) || bufferedSec > whisperMaxSecRef.current) {
           flushWhisperUtterance();
         }
       };
@@ -1191,7 +1240,7 @@ export default function App() {
 
   // Translate a piece of text with a specific provider/key (room translator path).
   const translateWith = useCallback(async (info: NonNullable<typeof keyInfo>, text: string): Promise<string> => {
-    const sys = 'You are a professional translator. Translate the English into natural, fluent Traditional Chinese (Taiwan style). Return ONLY the translated Chinese — no quotes, no JSON, no explanation.';
+    const sys = 'You are a professional translator. Translate the English into natural, fluent Traditional Chinese (Taiwan style). The text may be a partial or incomplete fragment captured from live speech — still translate whatever is given as faithfully as possible, even if it is only a sentence fragment. Always return a translation; never refuse, never explain, never return an empty string. Return ONLY the translated Chinese — no quotes, no notes, no JSON.';
     if (info.provider === 'openai') return (await callOpenAI(info.key, info.model, text, sys)).trim();
     if (info.provider === 'claude') return (await callClaude(info.key, info.model, text, sys)).trim();
     const client = getGeminiClient(info.key);
@@ -2504,6 +2553,57 @@ export default function App() {
                           "block w-5 h-5 rounded-full bg-white shadow transition-transform",
                           autoSwitchAccent ? "translate-x-5" : "translate-x-0"
                         )} />
+                      </button>
+                    </div>
+
+                    {/* Whisper (high-accuracy) capture parameters */}
+                    <div className="p-3.5 rounded-2xl border border-zinc-200 bg-zinc-50/60 space-y-3">
+                      <p className="text-xs font-bold text-zinc-700">🎯 高精準（Whisper）收音參數</p>
+
+                      <div>
+                        <div className="flex justify-between text-[11px] font-bold text-zinc-500">
+                          <span>收音靈敏度（越小越靈敏）</span><span>{whisperSilenceThresh.toFixed(3)}</span>
+                        </div>
+                        <input type="range" min={0.004} max={0.04} step={0.002} value={whisperSilenceThresh}
+                          onChange={(e) => setWhisperSilenceThresh(Number(e.target.value))}
+                          className="w-full accent-indigo-600" />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-[11px] font-bold text-zinc-500">
+                          <span>停頓多久算一句斷句</span><span>{whisperPauseMs} ms</span>
+                        </div>
+                        <input type="range" min={300} max={2000} step={50} value={whisperPauseMs}
+                          onChange={(e) => setWhisperPauseMs(Number(e.target.value))}
+                          className="w-full accent-indigo-600" />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-[11px] font-bold text-zinc-500">
+                          <span>單句最長（強制斷句）</span><span>{whisperMaxSec} 秒</span>
+                        </div>
+                        <input type="range" min={6} max={30} step={1} value={whisperMaxSec}
+                          onChange={(e) => setWhisperMaxSec(Number(e.target.value))}
+                          className="w-full accent-indigo-600" />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-zinc-500 mb-1">辨識模型（越大越準、下載越大越慢）</label>
+                        <select value={whisperModel} onChange={(e) => setWhisperModel(e.target.value)}
+                          className="w-full p-2 bg-white border border-zinc-200 rounded-xl text-xs outline-none focus:border-indigo-500">
+                          <option value="Xenova/whisper-tiny">Tiny（最快 · ~75MB）</option>
+                          <option value="Xenova/whisper-base">Base（推薦 · ~145MB）</option>
+                          <option value="Xenova/whisper-small">Small（最準 · ~480MB）</option>
+                        </select>
+                        <p className="text-[10px] text-zinc-400 mt-1">更換模型會重新下載並重載。</p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => { setWhisperSilenceThresh(0.012); setWhisperPauseMs(700); setWhisperMaxSec(18); }}
+                        className="text-[11px] font-bold text-indigo-600 underline"
+                      >
+                        回復預設值
                       </button>
                     </div>
 
