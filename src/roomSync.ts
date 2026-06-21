@@ -71,8 +71,36 @@ export const joinPresence = (roomId: string, deviceId: string, label: string): v
   const d = getDb();
   if (!d) return;
   const meRef = ref(d, `rooms/${roomId}/members/${deviceId}`);
-  set(meRef, { label, ts: Date.now() }).catch((e) => console.error('joinPresence failed', e));
+  set(meRef, { label, ts: Date.now(), recording: false }).catch((e) => console.error('joinPresence failed', e));
   onDisconnect(meRef).remove().catch(() => {});
+};
+
+// Report whether this device is currently recording.
+export const setMemberRecording = (roomId: string, deviceId: string, recording: boolean): void => {
+  const d = getDb();
+  if (!d) return;
+  update(ref(d, `rooms/${roomId}/members/${deviceId}`), { recording }).catch(() => {});
+};
+
+// Send a start/stop command to another device in the room.
+export const sendCommand = (roomId: string, targetDeviceId: string, action: 'start' | 'stop', from: string): void => {
+  const d = getDb();
+  if (!d) return;
+  set(ref(d, `rooms/${roomId}/commands/${targetDeviceId}`), { action, ts: Date.now(), from }).catch(() => {});
+};
+
+// Listen for commands addressed to this device.
+export const subscribeCommand = (
+  roomId: string,
+  deviceId: string,
+  cb: (cmd: { action: 'start' | 'stop'; ts: number; from: string }) => void,
+): (() => void) => {
+  const d = getDb();
+  if (!d) return () => {};
+  return onValue(ref(d, `rooms/${roomId}/commands/${deviceId}`), (snap) => {
+    const v = snap.val();
+    if (v && v.action && v.ts) cb(v);
+  });
 };
 
 export const leavePresence = (roomId: string, deviceId: string): void => {
@@ -83,13 +111,13 @@ export const leavePresence = (roomId: string, deviceId: string): void => {
 
 export const subscribeMembers = (
   roomId: string,
-  cb: (members: { id: string; label: string }[]) => void,
+  cb: (members: { id: string; label: string; recording: boolean }[]) => void,
 ): (() => void) => {
   const d = getDb();
   if (!d) return () => {};
   return onValue(ref(d, `rooms/${roomId}/members`), (snap) => {
     const val = snap.val() || {};
-    cb(Object.keys(val).map((id) => ({ id, label: val[id]?.label || '裝置' })));
+    cb(Object.keys(val).map((id) => ({ id, label: val[id]?.label || '裝置', recording: !!val[id]?.recording })));
   });
 };
 

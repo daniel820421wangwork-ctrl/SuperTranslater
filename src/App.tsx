@@ -12,6 +12,7 @@ import { isFirebaseConfigured, parseFirebaseConfig, saveFirebaseConfig, clearFir
 import {
   pushSegment, updateSegment, clearRoomSegments, subscribeSegments,
   joinPresence, leavePresence, subscribeMembers, subscribeConnection,
+  setMemberRecording, sendCommand, subscribeCommand,
 } from './roomSync';
 
 // Stable per-device identity + a human label for the multi-device timeline.
@@ -347,7 +348,7 @@ export default function App() {
 
   // ===== Multi-device room sync =====
   const [roomId, setRoomId] = useState<string | null>(null);
-  const [roomMembers, setRoomMembers] = useState<{ id: string; label: string }[]>([]);
+  const [roomMembers, setRoomMembers] = useState<{ id: string; label: string; recording: boolean }[]>([]);
   const [roomConnected, setRoomConnected] = useState(false);
   const [isRoomOpen, setIsRoomOpen] = useState(false);
   const [joinCodeInput, setJoinCodeInput] = useState('');
@@ -1015,52 +1016,76 @@ export default function App() {
     whisperWorkerRef.current = null;
   }, [stopWhisperRecording]);
 
-  const toggleRecording = () => {
-    // High-accuracy mode uses the in-browser Whisper engine instead.
-    if (recognitionMode === 'whisper') {
-      if (isActualRecordingRef.current) {
-        stopWhisperRecording();
-      } else {
-        startWhisperRecording();
-      }
-      return;
-    }
-
+  const startRecording = useCallback(() => {
+    if (isActualRecordingRef.current) return;
+    if (recognitionMode === 'whisper') { startWhisperRecording(); return; }
     if (!recognitionRef.current) {
       addToast('您的瀏覽器不支援語音辨識功能。推薦使用下方的「手動鍵盤輸入」！');
       return;
     }
+    try {
+      setError(null);
+      setSpeechErrorDetected(null);
+      shouldKeepRecordingRef.current = true; // keep recording across auto-ends
+      recognitionRef.current.start();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('already started')) {
+        setIsRecording(true);
+        isActualRecordingRef.current = true;
+        return;
+      }
+      console.error('Start recognition error:', err);
+      shouldKeepRecordingRef.current = false;
+      setSpeechErrorDetected('start-failed');
+      setIsRecording(false);
+      isActualRecordingRef.current = false;
+      addToast('麥克風啟動失敗，請至下方手動輸入欄進行法醫比對與翻譯。');
+    }
+  }, [recognitionMode, startWhisperRecording, addToast]);
 
-    if (isActualRecordingRef.current) {
+  const stopRecording = useCallback(() => {
+    if (recognitionMode === 'whisper') { stopWhisperRecording(); return; }
+    if (isActualRecordingRef.current && recognitionRef.current) {
       try {
         shouldKeepRecordingRef.current = false; // user-initiated stop: don't auto-restart
         recognitionRef.current.stop();
       } catch (err) {
         console.error('Stop recognition error:', err);
       }
-    } else {
-      try {
-        setError(null);
-        setSpeechErrorDetected(null);
-        shouldKeepRecordingRef.current = true; // keep recording across auto-ends
-        recognitionRef.current.start();
-      } catch (err) {
-        // Ignore "already started" error if it somehow still happens
-        if (err instanceof Error && err.message.includes('already started')) {
-          console.warn('Recognition already started, ignoring.');
-          setIsRecording(true);
-          isActualRecordingRef.current = true;
-          return;
-        }
-        console.error('Start recognition error:', err);
-        shouldKeepRecordingRef.current = false;
-        setSpeechErrorDetected('start-failed');
-        setIsRecording(false);
-        isActualRecordingRef.current = false;
-        addToast('麥克風啟動失敗，請至下方手動輸入欄進行法醫比對與翻譯。');
-      }
     }
+  }, [recognitionMode, stopWhisperRecording]);
+
+  const toggleRecording = () => {
+    if (isActualRecordingRef.current) stopRecording(); else startRecording();
   };
+
+  // Keep live refs so the room command listener always calls the current fns.
+  const startRecordingRef = useRef(startRecording);
+  const stopRecordingRef = useRef(stopRecording);
+  useEffect(() => { startRecordingRef.current = startRecording; stopRecordingRef.current = stopRecording; });
+
+  // Report this device's recording state to the room.
+  useEffect(() => {
+    if (roomId) setMemberRecording(roomId, deviceIdRef.current, isRecording);
+  }, [isRecording, roomId]);
+
+  // Obey start/stop commands sent from other devices in the room.
+  useEffect(() => {
+    if (!roomId) return;
+    let lastTs = Date.now();
+    const unsub = subscribeCommand(roomId, deviceIdRef.current, (cmd) => {
+      if (cmd.ts <= lastTs) return; // ignore the pre-existing/stale command
+      lastTs = cmd.ts;
+      if (cmd.action === 'start') {
+        startRecordingRef.current();
+        addToast(`${cmd.from} 要求本機開始收音`, 'info');
+      } else if (cmd.action === 'stop') {
+        stopRecordingRef.current();
+        addToast(`${cmd.from} 要求本機停止收音`, 'info');
+      }
+    });
+    return () => unsub();
+  }, [roomId, addToast]);
 
   const submitManualText = async () => {
     const text = manualInputText.trim();
@@ -2000,18 +2025,39 @@ export default function App() {
                       <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
                         <Users className="w-3.5 h-3.5" /> 已連線裝置（{roomMembers.length}）
                       </p>
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="flex flex-col gap-1.5">
                         {roomMembers.length === 0 ? (
                           <span className="text-[11px] text-zinc-400">尚無其他裝置，請在另一台開啟連結</span>
-                        ) : roomMembers.map(m => (
-                          <span key={m.id} className={cn(
-                            "text-[11px] font-bold px-2 py-1 rounded-lg border",
-                            m.id === deviceIdRef.current ? "bg-indigo-50 text-indigo-700 border-indigo-100" : "bg-zinc-100 text-zinc-600 border-zinc-200"
-                          )}>
-                            {m.label}{m.id === deviceIdRef.current ? '（本機）' : ''}
-                          </span>
-                        ))}
+                        ) : roomMembers.map(m => {
+                          const isSelf = m.id === deviceIdRef.current;
+                          return (
+                            <div key={m.id} className={cn(
+                              "flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border",
+                              isSelf ? "bg-indigo-50 border-indigo-100" : "bg-zinc-50 border-zinc-200"
+                            )}>
+                              <span className="flex items-center gap-1.5 text-[11px] font-bold text-zinc-700 min-w-0">
+                                <span className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", m.recording ? "bg-red-500 animate-pulse" : "bg-zinc-300")} />
+                                <span className="truncate">{m.label}{isSelf ? '（本機）' : ''}</span>
+                                <span className="text-[10px] font-normal text-zinc-400">{m.recording ? '收音中' : '閒置'}</span>
+                              </span>
+                              {!isSelf && (
+                                <button
+                                  onClick={() => sendCommand(roomId, m.id, m.recording ? 'stop' : 'start', deviceLabelRef.current)}
+                                  className={cn(
+                                    "shrink-0 text-[10px] font-bold px-2 py-1 rounded-md border transition-colors",
+                                    m.recording
+                                      ? "text-red-600 bg-red-50 border-red-100 hover:bg-red-100"
+                                      : "text-emerald-700 bg-emerald-50 border-emerald-100 hover:bg-emerald-100"
+                                  )}
+                                >
+                                  {m.recording ? '⏹ 停止收音' : '▶ 開始收音'}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
+                      <p className="text-[10px] text-zinc-400 mt-1.5 leading-relaxed">提示：可在這裡遠端控制另一台裝置開始/停止收音。</p>
                     </div>
 
                     <button onClick={() => { leaveRoom(); }} className="w-full px-3 py-2.5 text-red-500 bg-red-50 hover:bg-red-100 font-bold text-xs rounded-xl border border-red-100">
