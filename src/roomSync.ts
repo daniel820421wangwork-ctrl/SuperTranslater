@@ -6,6 +6,8 @@ import {
   getDatabase, ref, push, update, remove, set,
   onChildAdded, onChildChanged, onValue, onDisconnect, type Database,
 } from 'firebase/database';
+
+export type LiveTranscript = { text: string; label: string; ts: number };
 import { loadFirebaseConfig } from './firebaseConfig';
 
 export type RoomSegment = {
@@ -177,6 +179,28 @@ export const subscribeRoomConfig = (
   const d = getDb();
   if (!d) return () => {};
   return onValue(ref(d, `rooms/${roomId}/config`), (snap) => cb(snap.val()));
+};
+
+// Live (interim) transcript for a recording device — cleared when they stop.
+export const setLiveTranscript = (roomId: string, deviceId: string, text: string, deviceLabel: string): void => {
+  const d = getDb();
+  if (!d) return;
+  update(ref(d, `rooms/${roomId}/live/${deviceId}`), { text, label: deviceLabel, ts: Date.now() }).catch(() => {});
+};
+
+export const clearLiveTranscript = (roomId: string, deviceId: string): void => {
+  const d = getDb();
+  if (!d) return;
+  remove(ref(d, `rooms/${roomId}/live/${deviceId}`)).catch(() => {});
+};
+
+export const subscribeLiveTranscripts = (
+  roomId: string,
+  cb: (transcripts: Record<string, LiveTranscript>) => void,
+): (() => void) => {
+  const d = getDb();
+  if (!d) return () => {};
+  return onValue(ref(d, `rooms/${roomId}/live`), (snap) => cb((snap.val() as Record<string, LiveTranscript>) || {}));
 };
 
 // Connection state to the Firebase backend (true = online).

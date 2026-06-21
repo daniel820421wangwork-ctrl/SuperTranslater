@@ -15,6 +15,8 @@ import {
   setMemberRecording, setMemberMeta, sendCommand, subscribeCommand,
   setRoomConfig, subscribeRoomConfig,
   pushClip, subscribeClips, deleteClip,
+  setLiveTranscript, clearLiveTranscript, subscribeLiveTranscripts,
+  type LiveTranscript,
 } from './roomSync';
 
 const IS_MOBILE = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -470,6 +472,9 @@ export default function App() {
     () => (localStorage.getItem('swift_translate_mode') === 'browser' ? 'browser' : 'ai')
   );
   const [roomTranslateMode, setRoomTranslateMode] = useState<TranslateMode | null>(null);
+  const [roomLiveTranscripts, setRoomLiveTranscripts] = useState<Record<string, LiveTranscript>>({});
+  const [highlightedSegId, setHighlightedSegId] = useState<string | null>(null);
+  const liveTranscriptDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [browserTranslatorState, setBrowserTranslatorState] = useState<BrowserTranslatorAvailability>('unknown');
   const [browserTranslatorProgress, setBrowserTranslatorProgress] = useState(0);
   const isRoomCreatorRef = useRef(false);
@@ -852,6 +857,7 @@ export default function App() {
     setRoomMembers([]);
     setRoomConnected(false);
     setRoomTranslateMode(null);
+    setRoomLiveTranscripts({});
     setHistory([]);
     try {
       const url = new URL(window.location.href);
@@ -906,7 +912,8 @@ export default function App() {
         whisperWorkerRef.current.postMessage({ type: 'transcribe', id: jobId, audio, language: 'english' }, [audio.buffer]);
       } catch (e) { console.error('clip transcribe failed', e); }
     });
-    roomUnsubsRef.current = [offSeg, offMembers, offConn, offConfig, offClips];
+    const offLive = subscribeLiveTranscripts(id, setRoomLiveTranscripts);
+    roomUnsubsRef.current = [offSeg, offMembers, offConn, offConfig, offClips, offLive];
     joinPresence(id, deviceIdRef.current, deviceLabelRef.current);
 
     try {
@@ -1389,10 +1396,22 @@ export default function App() {
   // Report this device's recording state + current recognition mode to the room.
   useEffect(() => {
     if (roomId) setMemberRecording(roomId, deviceIdRef.current, isRecording);
+    // Clear live transcript when recording stops
+    if (!isRecording && roomId) clearLiveTranscript(roomId, deviceIdRef.current);
   }, [isRecording, roomId]);
   useEffect(() => {
     if (roomId) setMemberMeta(roomId, deviceIdRef.current, { recMode: recognitionMode });
   }, [roomId, recognitionMode]);
+
+  // Debounced publish of live interim text to the room so others can see it.
+  useEffect(() => {
+    if (!roomId || !isRecording) return;
+    const text = (liveDraftTranscript + (liveDraftTranscript && interimTranscript ? ' ' : '') + interimTranscript).trim();
+    if (liveTranscriptDebounceRef.current) clearTimeout(liveTranscriptDebounceRef.current);
+    liveTranscriptDebounceRef.current = setTimeout(() => {
+      setLiveTranscript(roomId, deviceIdRef.current, text, deviceLabelRef.current);
+    }, 150);
+  }, [interimTranscript, liveDraftTranscript, roomId, isRecording]);
 
   // Obey start/stop commands sent from other devices in the room.
   useEffect(() => {
@@ -1900,12 +1919,32 @@ export default function App() {
                     )
                   ) : (
                     [...history].reverse().map(h => (
-                      <p key={h.id} style={{ fontSize: transFontPx }} className="leading-relaxed text-zinc-700">
+                      <p
+                        key={h.id}
+                        data-seg-id={h.id}
+                        style={{ fontSize: transFontPx }}
+                        className={cn(
+                          "leading-relaxed rounded px-1 -mx-1 transition-colors duration-300",
+                          highlightedSegId === h.id
+                            ? "text-indigo-700 bg-indigo-50 ring-1 ring-indigo-200"
+                            : "text-zinc-700"
+                        )}
+                      >
                         {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}</span>}
                         {h.original}
                       </p>
                     ))
                   )}
+                  {/* Live interim text from other recording devices in the room */}
+                  {Object.entries(roomLiveTranscripts)
+                    .filter(([id, lt]) => id !== deviceIdRef.current && lt.text)
+                    .map(([id, lt]) => (
+                      <p key={id} style={{ fontSize: transFontPx }} className="leading-relaxed text-blue-500 italic">
+                        {lt.label && <span className="text-[10px] font-bold text-blue-300 mr-1.5 align-middle not-italic">{lt.label}</span>}
+                        {lt.text}
+                      </p>
+                    ))
+                  }
                   {interimTranscript && (
                     <p style={{ fontSize: transFontPx }} className="leading-relaxed text-indigo-500 italic">{interimTranscript}</p>
                   )}
@@ -2254,14 +2293,19 @@ export default function App() {
                 {history.map((entry) => {
                   const isEditing = editingId === entry.id;
                   return (
-                    <motion.div 
+                    <motion.div
                       key={entry.id}
                       initial={{ opacity: 0, y: isCompact ? -5 : -10 }}
                       animate={{ opacity: 1, y: 0 }}
+                      onClick={() => {
+                        setHighlightedSegId(entry.id);
+                        const el = document.querySelector(`[data-seg-id="${entry.id}"]`);
+                        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      }}
                       className={cn(
-                        "group/entry transition-all",
-                        isCompact 
-                          ? "p-2 grid grid-cols-1 md:grid-cols-12 gap-3 items-start border-b border-zinc-100 hover:bg-zinc-50/70" 
+                        "group/entry transition-all cursor-pointer",
+                        isCompact
+                          ? "p-2 grid grid-cols-1 md:grid-cols-12 gap-3 items-start border-b border-zinc-100 hover:bg-zinc-50/70"
                           : "grid grid-cols-1 md:grid-cols-2 gap-3 border border-zinc-100 p-2.5 md:p-3 rounded-xl hover:bg-zinc-50/50 hover:border-zinc-200 shadow-sm"
                       )}
                     >
