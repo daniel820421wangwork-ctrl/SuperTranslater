@@ -42,7 +42,10 @@ const base64Pcm16ToFloat32 = (b64: string): Float32Array => {
   for (let i = 0; i < out.length; i++) out[i] = view.getInt16(i * 2, true) / 0x8000;
   return out;
 };
-import { browserTranslate, browserTranslateAvailable } from './browserTranslate';
+import {
+  browserTranslate, browserTranslateAvailable, getBrowserTranslator, getBrowserTranslatorAvailability,
+  type BrowserTranslatorAvailability,
+} from './browserTranslate';
 import { MicVAD } from '@ricky0123/vad-web';
 
 type TranslateMode = 'ai' | 'browser';
@@ -417,6 +420,8 @@ export default function App() {
   );
   const [whisperState, setWhisperState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [whisperProgress, setWhisperProgress] = useState(0);
+  const [whisperActivity, setWhisperActivity] = useState<'idle' | 'listening' | 'speech' | 'transcribing'>('idle');
+  const whisperPendingJobsRef = useRef(0);
 
   // User-adjustable Silero VAD + Whisper parameters (persisted).
   const numFromLS = (k: string, d: number) => { const n = Number(localStorage.getItem(k)); return Number.isFinite(n) && n > 0 ? n : d; };
@@ -452,6 +457,8 @@ export default function App() {
     () => (localStorage.getItem('swift_translate_mode') === 'browser' ? 'browser' : 'ai')
   );
   const [roomTranslateMode, setRoomTranslateMode] = useState<TranslateMode | null>(null);
+  const [browserTranslatorState, setBrowserTranslatorState] = useState<BrowserTranslatorAvailability>('unknown');
+  const [browserTranslatorProgress, setBrowserTranslatorProgress] = useState(0);
   const isRoomCreatorRef = useRef(false);
   const deviceIdRef = useRef<string>(getDeviceId());
   const deviceLabelRef = useRef<string>(detectDeviceLabel());
@@ -882,6 +889,8 @@ export default function App() {
       try {
         const audio = base64Pcm16ToFloat32(clip.audio);
         const jobId = ++whisperJobRef.current;
+        whisperPendingJobsRef.current += 1;
+        setWhisperActivity('transcribing');
         clipJobsRef.current.set(jobId, { key, deviceId: clip.deviceId, deviceLabel: clip.deviceLabel, ts: clip.ts });
         whisperWorkerRef.current.postMessage({ type: 'transcribe', id: jobId, audio, language: 'english' }, [audio.buffer]);
       } catch (e) { console.error('clip transcribe failed', e); }
@@ -941,6 +950,16 @@ export default function App() {
         setWhisperState('error');
         addToast(`Whisper 載入失敗：${msg.error || '未知錯誤'}`, 'error');
       } else if (msg.type === 'result') {
+        whisperPendingJobsRef.current = Math.max(0, whisperPendingJobsRef.current - 1);
+        if (isActualRecordingRef.current) {
+          setWhisperActivity(whisperPendingJobsRef.current > 0 ? 'transcribing' : 'listening');
+        } else if (whisperPendingJobsRef.current === 0) {
+          setWhisperActivity('idle');
+        }
+        if (msg.error) {
+          console.error('Whisper transcription failed', msg.error);
+          addToast(`Whisper 轉錄失敗：${msg.error}`, 'error');
+        }
         const cleaned = cleanTranscript(msg.text || '');
         const job = clipJobsRef.current.get(msg.id);
         if (job) {
@@ -1002,6 +1021,8 @@ export default function App() {
     if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25 || !whisperReadyRef.current) return;
     normalizeAudio(audio);
     const id = ++whisperJobRef.current;
+    whisperPendingJobsRef.current += 1;
+    setWhisperActivity('transcribing');
     whisperWorkerRef.current?.postMessage({ type: 'transcribe', id, audio, language: 'english' }, [audio.buffer]);
   }, []);
 
@@ -1015,6 +1036,7 @@ export default function App() {
         audio: float32ToBase64Pcm16(audio),
         deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current, ts: Date.now(),
       });
+      setWhisperActivity('listening');
     } else {
       transcribeLocal(audio);
     }
@@ -1025,6 +1047,7 @@ export default function App() {
     isActualRecordingRef.current = false;
     setIsRecording(false);
     setInterimTranscript('');
+    setWhisperActivity('idle');
     if (vadRef.current) {
       try { vadRef.current.destroy(); } catch {}
       vadRef.current = null;
@@ -1066,21 +1089,26 @@ export default function App() {
       }
       const baseUrl = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
       // Silero VAD detects real speech and hands us each utterance at 16kHz.
-      // redemptionFrames ≈ pause length (each frame ~32ms at 16kHz).
+      // Current vad-web uses millisecond-based segmentation options.
       const vad = await MicVAD.new({
         baseAssetPath: `${baseUrl}vad-assets/`,
         onnxWASMBasePath: `${baseUrl}ort-assets/`,
         startOnLoad: false,
+        model: 'v5',
         positiveSpeechThreshold: vadThreshold,
         negativeSpeechThreshold: Math.max(0.1, vadThreshold - 0.15),
-        redemptionFrames: Math.max(2, Math.round(whisperPauseMs / 32)),
-        minSpeechFrames: 3,
-        preSpeechPadFrames: 6,
+        redemptionMs: whisperPauseMs,
+        minSpeechMs: 250,
+        preSpeechPadMs: 300,
+        submitUserSpeechOnPause: true,
         additionalAudioConstraints: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
         } as any,
+        onSpeechStart: () => setWhisperActivity('speech'),
+        onSpeechRealStart: () => setWhisperActivity('speech'),
+        onVADMisfire: () => setWhisperActivity('listening'),
         onSpeechEnd: (audio: Float32Array) => { handleUtterance(audio); },
       } as any);
       vadRef.current = vad;
@@ -1088,6 +1116,7 @@ export default function App() {
       shouldKeepRecordingRef.current = true;
       isActualRecordingRef.current = true;
       setIsRecording(true);
+      setWhisperActivity('listening');
       setSpeechErrorDetected(null);
     } catch (err) {
       console.error('VAD/mic error', err);
@@ -1358,7 +1387,67 @@ export default function App() {
   // Whether this device can serve as the room's translator under the current
   // mode: AI needs a key; browser needs Translator API support; off needs none.
   const browserAvail = useMemo(() => browserTranslateAvailable(), []);
-  const deviceCanTranslate = effectiveTranslateMode === 'browser' ? browserAvail : hasUsableKey;
+  useEffect(() => {
+    if (!browserAvail) {
+      setBrowserTranslatorState('unavailable');
+      return;
+    }
+    getBrowserTranslatorAvailability()
+      .then(setBrowserTranslatorState)
+      .catch(() => setBrowserTranslatorState('unknown'));
+  }, [browserAvail]);
+
+  const prepareBrowserTranslator = useCallback(async (): Promise<boolean> => {
+    if (!browserAvail) {
+      setBrowserTranslatorState('unavailable');
+      addToast('此裝置不支援 Chrome 內建翻譯。此功能目前僅支援新版桌面版 Chrome。', 'error');
+      return false;
+    }
+    try {
+      setBrowserTranslatorProgress(0);
+      setBrowserTranslatorState('downloading');
+      // Must be invoked directly from the click event: Chrome requires user
+      // activation before it can create/download the language pack.
+      await getBrowserTranslator((progress) => {
+        setBrowserTranslatorProgress(progress);
+        setBrowserTranslatorState(progress >= 100 ? 'available' : 'downloading');
+      });
+      setBrowserTranslatorProgress(100);
+      setBrowserTranslatorState('available');
+      addToast('瀏覽器內建英翻中已就緒，後續不會使用 AI API。', 'success');
+      return true;
+    } catch (error) {
+      console.error('Browser translator initialization failed', error);
+      setBrowserTranslatorState('unavailable');
+      addToast(error instanceof Error ? `內建翻譯啟動失敗：${error.message}` : '內建翻譯啟動失敗', 'error');
+      return false;
+    }
+  }, [addToast, browserAvail]);
+
+  const chooseSoloTranslateMode = useCallback((mode: TranslateMode) => {
+    if (mode === 'ai') {
+      setTranslateMode('ai');
+      return;
+    }
+    void prepareBrowserTranslator().then((ready) => {
+      if (ready) setTranslateMode('browser');
+    });
+  }, [prepareBrowserTranslator]);
+
+  const chooseRoomTranslateMode = useCallback((mode: TranslateMode) => {
+    if (!roomId || !isRoomCreatorRef.current) return;
+    if (mode === 'ai') {
+      setRoomConfig(roomId, { translateMode: 'ai' });
+      return;
+    }
+    void prepareBrowserTranslator().then((ready) => {
+      if (ready) setRoomConfig(roomId, { translateMode: 'browser' });
+    });
+  }, [prepareBrowserTranslator, roomId]);
+
+  const deviceCanTranslate = effectiveTranslateMode === 'browser'
+    ? browserTranslatorState === 'available'
+    : hasUsableKey;
 
   // Publish this device's translate capability + the provider/source it'd use.
   useEffect(() => {
@@ -1488,6 +1577,13 @@ export default function App() {
   };
 
   const activeLangLabel = LANGUAGES.find(l => l.code === selectedLang)?.label || selectedLang;
+  const whisperActivityLabel = whisperActivity === 'speech'
+    ? '偵測到語音，請繼續說'
+    : whisperActivity === 'transcribing'
+      ? `正在轉錄${whisperPendingJobsRef.current > 1 ? `（${whisperPendingJobsRef.current} 段排隊）` : '…'}`
+      : whisperActivity === 'listening'
+        ? '正在等待語音'
+        : '高精準模式待命';
 
   // When any device (local or remote) is recording, the left panel switches to
   // a continuous full-transcript view.
@@ -1714,7 +1810,12 @@ export default function App() {
             <div className="flex items-center justify-between mb-3 flex-none">
               <div className="flex items-center gap-2 min-w-0">
                 <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
-                <h2 className="text-xs font-black text-zinc-500 uppercase tracking-widest truncate">完整逐字稿 · 收音中</h2>
+                <div className="min-w-0">
+                  <h2 className="text-xs font-black text-zinc-500 uppercase tracking-widest truncate">完整逐字稿 · 收音中</h2>
+                  {isRecording && recognitionMode === 'whisper' && (
+                    <p className="text-[10px] font-bold text-emerald-600 mt-0.5">{whisperActivityLabel}</p>
+                  )}
+                </div>
               </div>
               {isRecording ? (
                 <button onClick={() => stopRecording()} className="shrink-0 text-[11px] font-bold px-2.5 py-1 rounded-lg bg-red-50 text-red-600 border border-red-100 hover:bg-red-100 flex items-center gap-1">
@@ -1765,14 +1866,28 @@ export default function App() {
                   發音目標：{activeLangLabel}
                 </p>
               </div>
-              <span className={cn(
-                "text-[9px] px-2 py-0.5 rounded-full font-bold",
-                isRecording
-                  ? (recognitionMode === 'whisper' ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600")
-                  : "bg-zinc-100 text-zinc-500"
-              )}>
-                {isRecording ? "正在接收..." : "錄音閒置"}
-              </span>
+              <div className="flex flex-col items-end gap-1">
+                <span className={cn(
+                  "text-[9px] px-2 py-0.5 rounded-full font-bold",
+                  isRecording
+                    ? (recognitionMode === 'whisper' ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600")
+                    : "bg-zinc-100 text-zinc-500"
+                )}>
+                  {isRecording ? "正在接收..." : "錄音閒置"}
+                </span>
+                <span className={cn(
+                  "text-[9px] px-2 py-0.5 rounded-full font-bold",
+                  effectiveTranslateMode === 'browser' && browserTranslatorState === 'available'
+                    ? "bg-sky-50 text-sky-700"
+                    : "bg-violet-50 text-violet-700"
+                )}>
+                  {effectiveTranslateMode === 'browser' && browserTranslatorState === 'available'
+                    ? '🌐 Chrome 內建翻譯'
+                    : effectiveTranslateMode === 'browser'
+                      ? '🌐 內建翻譯未就緒'
+                      : `✨ ${modelDisplayName(aiSettings.provider, aiSettings.provider === 'gemini' ? aiSettings.geminiModel : aiSettings.provider === 'openai' ? aiSettings.openaiModel : aiSettings.claudeModel)}`}
+                </span>
+              </div>
             </div>
 
             {/* Recognition engine toggle */}
@@ -1904,7 +2019,9 @@ export default function App() {
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
                 </span>
-                <span className="text-[11px] text-zinc-500 font-medium leading-relaxed">聆聽中…講完一句、停頓約一秒後會自動辨識並翻譯（高精準模式無即時逐字）</span>
+                <span className="text-[11px] text-zinc-500 font-medium leading-relaxed">
+                  {whisperActivityLabel}。講完一句並停頓約 {Math.max(0.2, whisperPauseMs / 1000).toFixed(1)} 秒後會自動切句；完成後會繼續收音。
+                </span>
               </div>
             )}
           </div>
@@ -2514,7 +2631,7 @@ export default function App() {
                               key={m}
                               type="button"
                               disabled={!editable}
-                              onClick={() => { if (editable && roomId) { setRoomConfig(roomId, { translateMode: m }); } }}
+                              onClick={() => chooseRoomTranslateMode(m)}
                               className={cn(
                                 "px-2 py-2 rounded-xl border text-[11px] font-bold transition-all",
                                 active ? "bg-indigo-600 border-indigo-700 text-white" : "bg-white border-zinc-200 text-zinc-600",
@@ -2528,6 +2645,13 @@ export default function App() {
                       </div>
                       {effectiveTranslateMode === 'browser' && !browserAvail && (
                         <p className="text-[10px] text-amber-600 mt-1">⚠️ 本機瀏覽器不支援內建翻譯;需房間內有支援的裝置(較新版 Chrome)才會翻。</p>
+                      )}
+                      {effectiveTranslateMode === 'browser' && browserTranslatorState !== 'available' && browserAvail && (
+                        <p className="text-[10px] text-amber-600 mt-1">
+                          {browserTranslatorState === 'downloading'
+                            ? `正在準備內建翻譯語言包${browserTranslatorProgress ? `（${browserTranslatorProgress}%）` : '…'}`
+                            : '內建翻譯尚未啟用，請由房主再點一次「瀏覽器內建」。'}
+                        </p>
                       )}
                     </div>
 
@@ -2555,7 +2679,7 @@ export default function App() {
                                     "text-[9px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap",
                                     activeTranslator?.id === m.id ? "bg-indigo-600 text-white" : "bg-zinc-200 text-zinc-500"
                                   )}>
-                                    🔑 {m.provider === 'openai' ? 'OpenAI' : m.provider === 'claude' ? 'Claude' : m.provider === 'gemini' ? 'Gemini' : '金鑰'}
+                                    {m.provider === 'browser' ? '🌐 Chrome 內建' : `🔑 ${m.provider === 'openai' ? 'OpenAI' : m.provider === 'claude' ? 'Claude' : m.provider === 'gemini' ? 'Gemini' : '金鑰'}`}
                                     {activeTranslator?.id === m.id ? ' · 翻譯中' : ''}
                                   </span>
                                 )}
@@ -2603,7 +2727,7 @@ export default function App() {
                       {activeTranslator ? (
                         <p className="text-[10px] mt-1.5 leading-relaxed px-2.5 py-1.5 rounded-lg bg-indigo-50 text-indigo-700 font-bold">
                           目前翻譯由 {activeTranslator.label}{activeTranslator.id === deviceIdRef.current ? '（本機）' : ''} 提供
-                          （{activeTranslator.provider === 'openai' ? 'OpenAI' : activeTranslator.provider === 'claude' ? 'Claude' : activeTranslator.provider === 'gemini' ? 'Gemini' : '金鑰'}）— 房間內任一台有金鑰即可翻譯
+                          （{activeTranslator.provider === 'browser' ? 'Chrome 內建翻譯' : activeTranslator.provider === 'openai' ? 'OpenAI' : activeTranslator.provider === 'claude' ? 'Claude' : activeTranslator.provider === 'gemini' ? 'Gemini' : '金鑰'}）
                         </p>
                       ) : (
                         <p className="text-[10px] mt-2 leading-relaxed px-2.5 py-1.5 rounded-lg bg-amber-50 text-amber-700 font-bold">
@@ -2834,7 +2958,7 @@ export default function App() {
                           <button
                             key={m}
                             type="button"
-                            onClick={() => setTranslateMode(m)}
+                            onClick={() => chooseSoloTranslateMode(m)}
                             className={cn(
                               "px-2 py-2.5 rounded-xl border text-xs font-bold transition-all",
                               translateMode === m ? "bg-indigo-600 border-indigo-700 text-white shadow-sm" : "bg-white border-zinc-200 text-zinc-600 hover:bg-zinc-50"
@@ -2846,7 +2970,13 @@ export default function App() {
                       </div>
                       <p className="text-[10px] text-zinc-400 mt-1.5 leading-relaxed">
                         {translateMode === 'browser'
-                          ? '使用瀏覽器內建翻譯（免金鑰、裝置端離線，需較新版 Chrome）。'
+                          ? browserTranslatorState === 'available'
+                            ? '✅ Chrome 內建翻譯已就緒（免金鑰、裝置端處理，不會呼叫 AI API）。'
+                            : browserTranslatorState === 'downloading'
+                              ? `正在下載或載入英翻中語言包${browserTranslatorProgress ? `（${browserTranslatorProgress}%）` : '…'}`
+                              : browserAvail
+                                ? '⚠️ 尚未啟用。請再點一次「瀏覽器內建」，由點擊動作授權建立語言包。'
+                                : '⚠️ 此裝置不支援；目前僅支援新版桌面版 Chrome，不支援手機瀏覽器。'
                           : '使用下方選擇的 AI 引擎與金鑰翻譯（含口音特徵分析）。'}
                       </p>
                     </div>

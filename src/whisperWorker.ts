@@ -4,6 +4,7 @@ import { pipeline } from '@huggingface/transformers';
 
 let transcriber: any = null;
 let loadedModel = '';
+let transcriptionQueue: Promise<void> = Promise.resolve();
 
 self.onmessage = async (e: MessageEvent) => {
   const msg = e.data || {};
@@ -29,23 +30,28 @@ self.onmessage = async (e: MessageEvent) => {
   }
 
   if (msg.type === 'transcribe') {
-    if (!transcriber) {
-      (self as any).postMessage({ type: 'result', id: msg.id, text: '' });
-      return;
-    }
-    try {
-      const out = await transcriber(msg.audio, {
-        language: msg.language || 'english',
-        task: 'transcribe',
-        // Reduce repetition-loop hallucinations on short/quiet chunks.
-        no_repeat_ngram_size: 3,
-        temperature: 0,
-      });
-      const text = (Array.isArray(out) ? out[0]?.text : out?.text) || '';
-      (self as any).postMessage({ type: 'result', id: msg.id, text: String(text).trim() });
-    } catch (err: any) {
-      (self as any).postMessage({ type: 'result', id: msg.id, text: '', error: String(err?.message || err) });
-    }
+    // A single transformers.js pipeline is not safe to run concurrently.
+    // Queue utterances so continuous VAD capture cannot stall after the first
+    // segment when the speaker talks again before inference has completed.
+    transcriptionQueue = transcriptionQueue.then(async () => {
+      if (!transcriber) {
+        (self as any).postMessage({ type: 'result', id: msg.id, text: '', error: 'Whisper model is not ready' });
+        return;
+      }
+      try {
+        const out = await transcriber(msg.audio, {
+          language: msg.language || 'english',
+          task: 'transcribe',
+          // Reduce repetition-loop hallucinations on short/quiet chunks.
+          no_repeat_ngram_size: 3,
+          temperature: 0,
+        });
+        const text = (Array.isArray(out) ? out[0]?.text : out?.text) || '';
+        (self as any).postMessage({ type: 'result', id: msg.id, text: String(text).trim() });
+      } catch (err: any) {
+        (self as any).postMessage({ type: 'result', id: msg.id, text: '', error: String(err?.message || err) });
+      }
+    });
     return;
   }
 };
