@@ -14,6 +14,7 @@ export type RoomSegment = {
   deviceId: string;
   deviceLabel: string;
   ts: number;
+  translatedBy?: string;
 };
 
 let db: Database | null = null;
