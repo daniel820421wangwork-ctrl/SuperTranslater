@@ -52,15 +52,11 @@ type TranslateMode = 'ai' | 'browser';
 type RecognitionMode = 'dual' | 'live' | 'whisper';
 type VisibleBlocks = {
   voiceControls: boolean;
-  sessionMemory: boolean;
-  speechDiagnostics: boolean;
   timeline: boolean;
 };
 
 const DEFAULT_VISIBLE_BLOCKS: VisibleBlocks = {
   voiceControls: true,
-  sessionMemory: true,
-  speechDiagnostics: true,
   timeline: true,
 };
 
@@ -394,7 +390,6 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'transcript' | 'summary'>('transcript');
   
   // Manual text fallback & voice error states
-  const [manualInputText, setManualInputText] = useState('');
   const [speechErrorDetected, setSpeechErrorDetected] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState<string>('');
@@ -475,7 +470,7 @@ export default function App() {
   const deviceLabelRef = useRef<string>(detectDeviceLabel());
   const roomUnsubsRef = useRef<Array<() => void>>([]);
 
-  // Resizable left panel width (px), only used in the wide horizontal layout.
+  // Resizable left panel width (px), only used in the side-by-side layout when both panels visible.
   const [leftWidth, setLeftWidth] = useState<number>(() => {
     const saved = Number(localStorage.getItem('swift_left_panel_width'));
     return saved >= 300 && saved <= 760 ? saved : 420;
@@ -494,18 +489,16 @@ export default function App() {
     localStorage.setItem('swift_transcript_ai_settings_v2', JSON.stringify(aiSettings));
   }, [aiSettings]);
 
-  // Track whether we're in the side-by-side (lg) layout so the drag handle
-  // and fixed pixel width only apply there; on mobile it stacks vertically.
+  useEffect(() => {
+    localStorage.setItem('swift_left_panel_width', String(leftWidth));
+  }, [leftWidth]);
+
   useEffect(() => {
     const mq = window.matchMedia('(min-width: 1024px)');
     const onChange = (e: MediaQueryListEvent) => setIsWideLayout(e.matches);
     mq.addEventListener('change', onChange);
     return () => mq.removeEventListener('change', onChange);
   }, []);
-
-  useEffect(() => {
-    localStorage.setItem('swift_left_panel_width', String(leftWidth));
-  }, [leftWidth]);
 
   useEffect(() => {
     localStorage.setItem('swift_auto_switch_accent', String(autoSwitchAccent));
@@ -520,12 +513,11 @@ export default function App() {
   }, [visibleBlocks]);
 
   const transFontPx = TRANS_FONT_SIZES[transSizeIdx].px;
-  const showLeftPanel = visibleBlocks.voiceControls || visibleBlocks.speechDiagnostics;
+  const showLeftPanel = visibleBlocks.voiceControls;
   const toggleVisibleBlock = (block: keyof VisibleBlocks) => {
     setVisibleBlocks((current) => ({ ...current, [block]: !current[block] }));
   };
 
-  // Drag the divider to resize the left console panel.
   const startPanelDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -1571,19 +1563,6 @@ export default function App() {
     }
   }, [history, activeTranslator, translateWith, effectiveTranslateMode]);
 
-  const submitManualText = async () => {
-    const text = manualInputText.trim();
-    if (!text) {
-      addToast('請輸入要翻譯與分析的英文文本。', 'info');
-      return;
-    }
-
-    // Route through commitSegment so it syncs to the room when connected.
-    setManualInputText('');
-    commitSegment(text);
-    addToast('已送出，正在翻譯與口音比對…', 'info');
-  };
-
   const handleSaveSegmentEdit = async (id: string) => {
     const text = editingText.trim();
     if (!text) {
@@ -1680,7 +1659,7 @@ export default function App() {
   }, [history, interimTranscript, someoneRecording]);
 
   return (
-    <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 flex flex-col lg:h-screen overflow-x-hidden lg:overflow-hidden pt-11">
+    <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 flex flex-col lg:h-screen overflow-x-hidden lg:overflow-hidden">
       
       {/* Toast Notification System */}
       <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] flex flex-col gap-2 w-full max-w-sm px-4 pointer-events-none">
@@ -1705,15 +1684,15 @@ export default function App() {
         </AnimatePresence>
       </div>
 
-      {/* Top Application Header (floating transparent bar) */}
-      <header className="fixed top-0 left-0 right-0 bg-white/70 backdrop-blur-md border-b border-zinc-200/40 px-3 sm:px-6 py-2 z-40">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 bg-indigo-600 rounded-lg flex items-center justify-center shadow-sm flex-shrink-0">
-              <Zap className="w-4 h-4 text-white fill-white" />
+      {/* Floating logo + menu button (same side, top-right) */}
+      <header className="fixed top-0 right-0 z-40 pointer-events-none">
+        <div className="flex items-center gap-2 px-3 sm:px-5 py-2 pointer-events-auto">
+          <div className="flex items-center gap-1.5">
+            <div className="w-5 h-5 bg-indigo-600 rounded-md flex items-center justify-center shadow-sm flex-shrink-0">
+              <Zap className="w-3 h-3 text-white fill-white" />
             </div>
-            <h1 className="text-sm font-extrabold tracking-tight text-zinc-700 flex items-center gap-1">
-              SwiftTranscript <span className="text-indigo-600">⚡</span>
+            <h1 className="text-[11px] font-extrabold tracking-tight text-zinc-400">
+              Swift<span className="text-indigo-600">⚡</span>
             </h1>
           </div>
 
@@ -1723,14 +1702,13 @@ export default function App() {
             aria-label="開啟選單"
             aria-expanded={isMenuOpen}
             className={cn(
-              "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-bold transition-all",
+              "flex items-center gap-1.5 px-2 py-1 rounded-lg border text-xs font-bold transition-all shadow-sm",
               isMenuOpen
                 ? "bg-indigo-600 border-indigo-700 text-white shadow-md"
-                : "bg-white/60 border-zinc-200/60 text-zinc-600 hover:bg-white"
+                : "bg-white/80 backdrop-blur-sm border-zinc-200/60 text-zinc-600 hover:bg-white"
             )}
           >
             {isMenuOpen ? <X className="w-3.5 h-3.5" /> : <Menu className="w-3.5 h-3.5" />}
-            <span className="hidden sm:inline text-[11px]">選單</span>
           </button>
         </div>
 
@@ -1739,13 +1717,13 @@ export default function App() {
           {isMenuOpen && (
             <>
               {/* click-away backdrop */}
-              <div className="fixed inset-0 z-40" onClick={() => setIsMenuOpen(false)} />
+              <div className="pointer-events-auto fixed inset-0 z-40" onClick={() => setIsMenuOpen(false)} />
               <motion.div
                 initial={{ opacity: 0, y: -8, scale: 0.98 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: -8, scale: 0.98 }}
                 transition={{ duration: 0.15 }}
-                className="absolute right-4 sm:right-6 top-full mt-2 w-[min(92vw,320px)] bg-white border border-zinc-200 rounded-2xl shadow-2xl z-50 p-4 flex flex-col gap-4"
+                className="pointer-events-auto absolute right-0 top-full mt-2 mr-3 sm:mr-5 w-[min(92vw,320px)] bg-white border border-zinc-200 rounded-2xl shadow-2xl z-50 p-4 flex flex-col gap-4"
               >
                 {/* Provider + model */}
                 <div className="flex flex-col gap-2">
@@ -1798,9 +1776,8 @@ export default function App() {
                   </div>
                   <div className="grid grid-cols-2 gap-1.5">
                     {([
-                      ['voiceControls', '語音控制'],
-                      ['speechDiagnostics', '語音提示'],
-                      ['timeline', '翻譯時間軸'],
+                      ['voiceControls', '即時逐字稿'],
+                      ['timeline', '翻譯紀錄'],
                     ] as [keyof VisibleBlocks, string][]).map(([key, label]) => (
                       <button
                         key={key}
@@ -1875,10 +1852,10 @@ export default function App() {
             While recording, it becomes a continuous full-transcript view. */}
         {showLeftPanel && (
         <section
-          style={isWideLayout && visibleBlocks.timeline ? { width: leftWidth } : undefined}
+          style={isWideLayout && visibleBlocks.timeline ? { width: leftWidth, flexShrink: 0, flexGrow: 0 } : undefined}
           className={cn(
-            "w-full shrink-0 border-b lg:border-b-0 border-zinc-200/80 bg-zinc-50/60 flex flex-col z-10",
-            !visibleBlocks.timeline && "lg:flex-1",
+            "border-b lg:border-b-0 border-zinc-200/80 bg-zinc-50/60 flex flex-col z-10",
+            !visibleBlocks.timeline && "flex-1 min-w-0",
             someoneRecording && visibleBlocks.voiceControls
               ? "p-3 sm:p-4 overflow-hidden min-h-[55vh] lg:min-h-0"
               : "p-3 sm:p-5 lg:p-6 gap-4 lg:gap-5 overflow-visible lg:overflow-y-auto"
@@ -2135,7 +2112,7 @@ export default function App() {
           )}
 
           {/* Browser Speech Compatibility Tips */}
-          {visibleBlocks.speechDiagnostics && speechErrorDetected && (
+          {speechErrorDetected && (
             <div className="bg-amber-50/80 border border-amber-200/60 p-4 rounded-3xl text-[11px] text-amber-800 leading-relaxed shadow-sm">
               💡 <strong>麥克風/語音連線提示：</strong>
               <span className="block mt-1">偵測到語音輸入限制（{speechErrorDetected === 'network' ? '網路語音服務中斷' : speechErrorDetected}）。請依上方錯誤提示檢查 HTTPS、網站麥克風權限及其他錄音程式；也可暫時使用手動輸入。</span>
@@ -2146,7 +2123,7 @@ export default function App() {
         </section>
         )}
 
-        {/* Draggable divider — only in the side-by-side layout */}
+        {/* Draggable divider — only when both panels are visible */}
         {isWideLayout && showLeftPanel && visibleBlocks.timeline && (
           <div
             onMouseDown={startPanelDrag}
@@ -2161,9 +2138,9 @@ export default function App() {
           </div>
         )}
 
-        {/* Right Side: Finalized Timeline (對話時間軸歷史記錄) - Completely Unobstructed! */}
+        {/* Right Side: Finalized Timeline (對話時間軸歷史記錄) */}
         {visibleBlocks.timeline && (
-        <section className="flex-1 min-w-0 min-h-[65vh] lg:min-h-0 bg-white p-3 sm:p-3.5 md:p-4.5 flex flex-col overflow-hidden relative">
+        <section className="flex-1 min-w-0 min-h-[65vh] lg:min-h-0 bg-white p-3 pt-9 sm:p-3.5 sm:pt-9 md:p-4.5 md:pt-9 flex flex-col overflow-hidden relative">
           
           <div className="flex-none flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2 border-b border-zinc-100 pb-2">
             <div>
