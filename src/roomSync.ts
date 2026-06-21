@@ -134,6 +134,22 @@ export const subscribeMembers = (
   });
 };
 
+// Room-level config (e.g. translation method), set by the room creator.
+export const setRoomConfig = (roomId: string, config: { translateMode: string }): void => {
+  const d = getDb();
+  if (!d) return;
+  update(ref(d, `rooms/${roomId}/config`), config).catch(() => {});
+};
+
+export const subscribeRoomConfig = (
+  roomId: string,
+  cb: (config: { translateMode?: string } | null) => void,
+): (() => void) => {
+  const d = getDb();
+  if (!d) return () => {};
+  return onValue(ref(d, `rooms/${roomId}/config`), (snap) => cb(snap.val()));
+};
+
 // Connection state to the Firebase backend (true = online).
 export const subscribeConnection = (cb: (connected: boolean) => void): (() => void) => {
   const d = getDb();

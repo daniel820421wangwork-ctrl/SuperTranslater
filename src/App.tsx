@@ -13,7 +13,11 @@ import {
   pushSegment, updateSegment, clearRoomSegments, subscribeSegments,
   joinPresence, leavePresence, subscribeMembers, subscribeConnection,
   setMemberRecording, setMemberMeta, sendCommand, subscribeCommand,
+  setRoomConfig, subscribeRoomConfig,
 } from './roomSync';
+import { browserTranslate, browserTranslateAvailable } from './browserTranslate';
+
+type TranslateMode = 'ai' | 'browser' | 'off';
 
 // Stable per-device identity + a human label for the multi-device timeline.
 const getDeviceId = (): string => {
@@ -27,6 +31,7 @@ const makeRoomCode = (): string => Math.random().toString(36).slice(2, 7).toUppe
 
 // Language configuration
 const LANGUAGES = [
+  { code: 'en', label: '不指定口音', flag: '🌐' },
   { code: 'en-US', label: '美式英文', flag: '🇺🇸' },
   { code: 'en-GB', label: '英式英文', flag: '🇬🇧' },
   { code: 'en-NZ', label: '紐西蘭英文', flag: '🇳🇿' },
@@ -354,6 +359,12 @@ export default function App() {
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [fbConfigInput, setFbConfigInput] = useState('');
   const roomIdRef = useRef<string | null>(null);
+  // Translation method (solo default; in a room the creator's choice wins).
+  const [translateMode, setTranslateMode] = useState<TranslateMode>(
+    () => (['ai', 'browser', 'off'].includes(localStorage.getItem('swift_translate_mode') || '') ? localStorage.getItem('swift_translate_mode') as TranslateMode : 'ai')
+  );
+  const [roomTranslateMode, setRoomTranslateMode] = useState<TranslateMode | null>(null);
+  const isRoomCreatorRef = useRef(false);
   const deviceIdRef = useRef<string>(getDeviceId());
   const deviceLabelRef = useRef<string>(detectDeviceLabel());
   const roomUnsubsRef = useRef<Array<() => void>>([]);
@@ -675,6 +686,15 @@ export default function App() {
     localStorage.setItem('swift_recognition_mode', recognitionMode);
   }, [recognitionMode]);
 
+  useEffect(() => {
+    localStorage.setItem('swift_translate_mode', translateMode);
+  }, [translateMode]);
+
+  // The mode actually in effect: in a room the creator's choice wins.
+  const effectiveTranslateMode: TranslateMode = roomId ? (roomTranslateMode || 'ai') : translateMode;
+  const effectiveTranslateModeRef = useRef(effectiveTranslateMode);
+  useEffect(() => { effectiveTranslateModeRef.current = effectiveTranslateMode; });
+
   // Push a finished transcript chunk into the timeline and translate it.
   // Shared by both the Web Speech and Whisper engines. In a multi-device room
   // the segment is published to Firebase (and rendered via the room listener);
@@ -692,7 +712,15 @@ export default function App() {
     } else {
       const segmentId = Math.random().toString(36).substring(7);
       setHistory(prev => [{ id: segmentId, original: clean, timestamp: Date.now() }, ...prev]);
-      translateSegmentRef.current(clean, segmentId);
+      const mode = effectiveTranslateModeRef.current;
+      if (mode === 'off') return; // transcript only
+      if (mode === 'browser') {
+        browserTranslate(clean)
+          .then(t => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translated: t } : h)))
+          .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translated: '[翻譯失敗，此瀏覽器不支援內建翻譯]' } : h)));
+      } else {
+        translateSegmentRef.current(clean, segmentId); // AI (full, with accent analysis)
+      }
     }
   }, []);
 
@@ -702,9 +730,11 @@ export default function App() {
     roomUnsubsRef.current = [];
     if (roomIdRef.current) leavePresence(roomIdRef.current, deviceIdRef.current);
     roomIdRef.current = null;
+    isRoomCreatorRef.current = false;
     setRoomId(null);
     setRoomMembers([]);
     setRoomConnected(false);
+    setRoomTranslateMode(null);
     setHistory([]);
     try {
       const url = new URL(window.location.href);
@@ -743,7 +773,11 @@ export default function App() {
     );
     const offMembers = subscribeMembers(id, setRoomMembers);
     const offConn = subscribeConnection(setRoomConnected);
-    roomUnsubsRef.current = [offSeg, offMembers, offConn];
+    const offConfig = subscribeRoomConfig(id, (cfg) => {
+      const m = cfg?.translateMode;
+      setRoomTranslateMode((m === 'ai' || m === 'browser' || m === 'off') ? m : 'ai');
+    });
+    roomUnsubsRef.current = [offSeg, offMembers, offConn, offConfig];
     joinPresence(id, deviceIdRef.current, deviceLabelRef.current);
 
     try {
@@ -754,7 +788,13 @@ export default function App() {
     addToast(`已加入房間 ${id}`, 'success');
   }, [addToast]);
 
-  const createRoom = useCallback(() => joinRoom(makeRoomCode()), [joinRoom]);
+  const createRoom = useCallback(() => {
+    const code = makeRoomCode();
+    isRoomCreatorRef.current = true;
+    joinRoom(code);
+    // Seed the room's translation method from this device's current choice.
+    setRoomConfig(code, { translateMode });
+  }, [joinRoom, translateMode]);
 
   // Auto-join a room from the URL (?room=CODE) on first load.
   useEffect(() => {
@@ -1112,40 +1152,51 @@ export default function App() {
     return (r.text || '').trim();
   }, [getGeminiClient]);
 
-  // Publish this device's key availability + the provider it would translate with.
-  useEffect(() => {
-    if (roomId) setMemberMeta(roomId, deviceIdRef.current, { hasKey: hasUsableKey, provider: keyInfo?.provider || '' });
-  }, [roomId, hasUsableKey, keyInfo]);
+  // Whether this device can serve as the room's translator under the current
+  // mode: AI needs a key; browser needs Translator API support; off needs none.
+  const browserAvail = useMemo(() => browserTranslateAvailable(), []);
+  const deviceCanTranslate =
+    effectiveTranslateMode === 'ai' ? hasUsableKey :
+    effectiveTranslateMode === 'browser' ? browserAvail : false;
 
-  // Deterministically elect one key-holding device as the room's translator
-  // (smallest id), so every device agrees on who translates.
+  // Publish this device's translate capability + the provider/source it'd use.
+  useEffect(() => {
+    if (roomId) setMemberMeta(roomId, deviceIdRef.current, {
+      hasKey: deviceCanTranslate,
+      provider: effectiveTranslateMode === 'browser' ? 'browser' : (keyInfo?.provider || ''),
+    });
+  }, [roomId, deviceCanTranslate, effectiveTranslateMode, keyInfo]);
+
+  // Elect one capable device as the room's translator (smallest id).
   const activeTranslator = useMemo(() => {
-    const withKey = roomMembers.filter(m => m.hasKey).sort((a, b) => a.id.localeCompare(b.id));
-    return withKey[0] || null;
+    const capable = roomMembers.filter(m => m.hasKey).sort((a, b) => a.id.localeCompare(b.id));
+    return capable[0] || null;
   }, [roomMembers]);
 
-  // If this device is the elected translator, translate any untranslated
-  // segments in the room and sync the result (with error fallback so a failed
-  // call never leaves a segment stuck on "翻譯中").
+  // If this device is the elected translator, translate untranslated segments
+  // and sync the result. Skipped entirely when the room mode is "off".
   const translatingKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!roomIdRef.current || !activeTranslator || activeTranslator.id !== deviceIdRef.current) return;
+    if (!roomIdRef.current || effectiveTranslateMode === 'off') return;
+    if (!activeTranslator || activeTranslator.id !== deviceIdRef.current) return;
     const info = keyInfoRef.current;
-    if (!info) return;
+    const mode = effectiveTranslateMode;
     for (const h of history) {
       if ((h.translated === undefined || h.translated === null || h.translated === '') && !translatingKeysRef.current.has(h.id)) {
         translatingKeysRef.current.add(h.id);
         const segId = h.id;
-        translateWith(info, h.original)
+        const job = mode === 'browser' ? browserTranslate(h.original)
+          : (info ? translateWith(info, h.original) : Promise.reject(new Error('no key')));
+        job
           .then((t) => { if (roomIdRef.current) updateSegment(roomIdRef.current, segId, { translated: t || '[翻譯失敗]' }); })
           .catch((e) => {
             console.error('room translate failed', e);
-            if (roomIdRef.current) updateSegment(roomIdRef.current, segId, { translated: '[翻譯失敗，請檢查該裝置的 API 金鑰]' });
+            if (roomIdRef.current) updateSegment(roomIdRef.current, segId, { translated: '[翻譯失敗，請檢查翻譯設定/金鑰]' });
           })
           .finally(() => translatingKeysRef.current.delete(segId));
       }
     }
-  }, [history, activeTranslator, translateWith]);
+  }, [history, activeTranslator, translateWith, effectiveTranslateMode]);
 
   const submitManualText = async () => {
     const text = manualInputText.trim();
@@ -1852,6 +1903,8 @@ export default function App() {
                           <div className="md:col-span-5 border-t border-dashed border-zinc-100 pt-1.5 md:pt-0 md:border-t-0 md:border-l md:pl-3.5 min-w-0">
                             {entry.translated ? (
                               <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{entry.translated}</p>
+                            ) : effectiveTranslateMode === 'off' ? (
+                              <span className="text-[11px] text-zinc-300 italic select-none">純逐字稿（未翻譯）</span>
                             ) : (
                               <div className="flex items-center gap-1 text-indigo-400 font-medium py-0.5 select-none">
                                 <div className="flex gap-0.5">
@@ -1949,6 +2002,8 @@ export default function App() {
                               </div>
                               {entry.translated ? (
                                 <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{entry.translated}</p>
+                              ) : effectiveTranslateMode === 'off' ? (
+                                <span className="text-[11.5px] text-zinc-300 italic select-none">純逐字稿（未翻譯）</span>
                               ) : (
                                 <div className="flex items-center gap-1.5 text-indigo-400 font-medium py-1">
                                   <div className="flex gap-1">
@@ -2080,6 +2135,38 @@ export default function App() {
                     >
                       <Copy className="w-4 h-4" /> 複製分享連結
                     </button>
+
+                    {/* Translation method — the room creator decides for everyone */}
+                    <div>
+                      <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-1.5">
+                        翻譯方式{isRoomCreatorRef.current ? '（你是房主，可調整）' : '（由房主決定）'}
+                      </p>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {(['ai', 'browser', 'off'] as TranslateMode[]).map((m) => {
+                          const label = m === 'ai' ? 'AI 翻譯' : m === 'browser' ? '瀏覽器內建' : '不翻譯';
+                          const active = effectiveTranslateMode === m;
+                          const editable = isRoomCreatorRef.current;
+                          return (
+                            <button
+                              key={m}
+                              type="button"
+                              disabled={!editable}
+                              onClick={() => { if (editable && roomId) { setRoomConfig(roomId, { translateMode: m }); } }}
+                              className={cn(
+                                "px-2 py-2 rounded-xl border text-[11px] font-bold transition-all",
+                                active ? "bg-indigo-600 border-indigo-700 text-white" : "bg-white border-zinc-200 text-zinc-600",
+                                editable ? "hover:bg-zinc-50" : "opacity-90 cursor-default"
+                              )}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {effectiveTranslateMode === 'browser' && !browserAvail && (
+                        <p className="text-[10px] text-amber-600 mt-1">⚠️ 本機瀏覽器不支援內建翻譯;需房間內有支援的裝置(較新版 Chrome)才會翻。</p>
+                      )}
+                    </div>
 
                     <div>
                       <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
@@ -2307,6 +2394,35 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="space-y-4">
+                    {/* Translation method */}
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">
+                        翻譯方式 {roomId && '（已連房間，實際以房主設定為準）'}
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {(['ai', 'browser', 'off'] as TranslateMode[]).map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => setTranslateMode(m)}
+                            className={cn(
+                              "px-2 py-2.5 rounded-xl border text-xs font-bold transition-all",
+                              translateMode === m ? "bg-indigo-600 border-indigo-700 text-white shadow-sm" : "bg-white border-zinc-200 text-zinc-600 hover:bg-zinc-50"
+                            )}
+                          >
+                            {m === 'ai' ? 'AI 翻譯' : m === 'browser' ? '瀏覽器內建' : '不翻譯'}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-zinc-400 mt-1.5 leading-relaxed">
+                        {translateMode === 'browser'
+                          ? '使用瀏覽器內建翻譯（免金鑰、裝置端離線，需較新版 Chrome）。'
+                          : translateMode === 'off'
+                            ? '只產生英文逐字稿，不進行翻譯。'
+                            : '使用下方選擇的 AI 引擎與金鑰翻譯（含口音特徵分析）。'}
+                      </p>
+                    </div>
+
                     {/* Provider selecting */}
                     <div>
                       <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">
