@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { GoogleGenAI } from "@google/genai";
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -12,7 +12,7 @@ import { isFirebaseConfigured, parseFirebaseConfig, saveFirebaseConfig, clearFir
 import {
   pushSegment, updateSegment, clearRoomSegments, subscribeSegments,
   joinPresence, leavePresence, subscribeMembers, subscribeConnection,
-  setMemberRecording, sendCommand, subscribeCommand,
+  setMemberRecording, setMemberMeta, sendCommand, subscribeCommand,
 } from './roomSync';
 
 // Stable per-device identity + a human label for the multi-device timeline.
@@ -348,7 +348,7 @@ export default function App() {
 
   // ===== Multi-device room sync =====
   const [roomId, setRoomId] = useState<string | null>(null);
-  const [roomMembers, setRoomMembers] = useState<{ id: string; label: string; recording: boolean }[]>([]);
+  const [roomMembers, setRoomMembers] = useState<{ id: string; label: string; recording: boolean; hasKey: boolean; provider: string }[]>([]);
   const [roomConnected, setRoomConnected] = useState(false);
   const [isRoomOpen, setIsRoomOpen] = useState(false);
   const [joinCodeInput, setJoinCodeInput] = useState('');
@@ -683,13 +683,11 @@ export default function App() {
     const clean = text.trim();
     if (!clean) return;
     if (roomIdRef.current && isFirebaseConfigured()) {
-      const key = pushSegment(roomIdRef.current, {
+      // Publish the raw segment; whichever device in the room holds an API key
+      // (the active translator) picks it up and fills in the translation.
+      pushSegment(roomIdRef.current, {
         original: clean, translated: null,
         deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current, ts: Date.now(),
-      });
-      // The creating device translates its own segment, then syncs the result.
-      Promise.resolve(translateSegmentRef.current(clean)).then((t) => {
-        if (key && roomIdRef.current) updateSegment(roomIdRef.current, key, { translated: t });
       });
     } else {
       const segmentId = Math.random().toString(36).substring(7);
@@ -1086,6 +1084,40 @@ export default function App() {
     });
     return () => unsub();
   }, [roomId, addToast]);
+
+  // Does this device hold a usable API key for its selected provider?
+  const hasUsableKey = useMemo(() => {
+    if (aiSettings.provider === 'openai') return !!aiSettings.openaiKey;
+    if (aiSettings.provider === 'claude') return !!aiSettings.claudeKey;
+    return !!aiSettings.geminiKey;
+  }, [aiSettings]);
+
+  // Publish this device's key availability + provider to the room.
+  useEffect(() => {
+    if (roomId) setMemberMeta(roomId, deviceIdRef.current, { hasKey: hasUsableKey, provider: aiSettings.provider });
+  }, [roomId, hasUsableKey, aiSettings.provider]);
+
+  // Deterministically elect one key-holding device as the room's translator
+  // (smallest id), so every device agrees on who translates.
+  const activeTranslator = useMemo(() => {
+    const withKey = roomMembers.filter(m => m.hasKey).sort((a, b) => a.id.localeCompare(b.id));
+    return withKey[0] || null;
+  }, [roomMembers]);
+
+  // If this device is the elected translator, translate any untranslated
+  // segments in the room and sync the result.
+  const translatingKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!roomIdRef.current || !activeTranslator || activeTranslator.id !== deviceIdRef.current) return;
+    for (const h of history) {
+      if ((h.translated === undefined || h.translated === null || h.translated === '') && !translatingKeysRef.current.has(h.id)) {
+        translatingKeysRef.current.add(h.id);
+        Promise.resolve(translateSegmentRef.current(h.original))
+          .then((t) => { if (roomIdRef.current) updateSegment(roomIdRef.current, h.id, { translated: t }); })
+          .finally(() => translatingKeysRef.current.delete(h.id));
+      }
+    }
+  }, [history, activeTranslator]);
 
   const submitManualText = async () => {
     const text = manualInputText.trim();
@@ -2035,10 +2067,19 @@ export default function App() {
                               "flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border",
                               isSelf ? "bg-indigo-50 border-indigo-100" : "bg-zinc-50 border-zinc-200"
                             )}>
-                              <span className="flex items-center gap-1.5 text-[11px] font-bold text-zinc-700 min-w-0">
+                              <span className="flex items-center gap-1.5 text-[11px] font-bold text-zinc-700 min-w-0 flex-wrap">
                                 <span className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", m.recording ? "bg-red-500 animate-pulse" : "bg-zinc-300")} />
                                 <span className="truncate">{m.label}{isSelf ? '（本機）' : ''}</span>
                                 <span className="text-[10px] font-normal text-zinc-400">{m.recording ? '收音中' : '閒置'}</span>
+                                {m.hasKey && (
+                                  <span className={cn(
+                                    "text-[9px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap",
+                                    activeTranslator?.id === m.id ? "bg-indigo-600 text-white" : "bg-zinc-200 text-zinc-500"
+                                  )}>
+                                    🔑 {m.provider === 'openai' ? 'OpenAI' : m.provider === 'claude' ? 'Claude' : m.provider === 'gemini' ? 'Gemini' : '金鑰'}
+                                    {activeTranslator?.id === m.id ? ' · 翻譯中' : ''}
+                                  </span>
+                                )}
                               </span>
                               {!isSelf && (
                                 <button
@@ -2057,6 +2098,16 @@ export default function App() {
                           );
                         })}
                       </div>
+                      {activeTranslator ? (
+                        <p className="text-[10px] mt-2 leading-relaxed px-2.5 py-1.5 rounded-lg bg-indigo-50 text-indigo-700 font-bold">
+                          目前翻譯由 {activeTranslator.label}{activeTranslator.id === deviceIdRef.current ? '（本機）' : ''} 提供
+                          （{activeTranslator.provider === 'openai' ? 'OpenAI' : activeTranslator.provider === 'claude' ? 'Claude' : activeTranslator.provider === 'gemini' ? 'Gemini' : '金鑰'}）— 房間內任一台有金鑰即可翻譯
+                        </p>
+                      ) : (
+                        <p className="text-[10px] mt-2 leading-relaxed px-2.5 py-1.5 rounded-lg bg-amber-50 text-amber-700 font-bold">
+                          ⚠️ 房間內目前沒有任何裝置提供 API 金鑰，內容會收錄但無法翻譯。請至少一台在「設定」填入金鑰。
+                        </p>
+                      )}
                       <p className="text-[10px] text-zinc-400 mt-1.5 leading-relaxed">提示：可在這裡遠端控制另一台裝置開始/停止收音。</p>
                     </div>
 

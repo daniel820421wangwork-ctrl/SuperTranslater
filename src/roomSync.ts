@@ -82,6 +82,13 @@ export const setMemberRecording = (roomId: string, deviceId: string, recording: 
   update(ref(d, `rooms/${roomId}/members/${deviceId}`), { recording }).catch(() => {});
 };
 
+// Report whether this device can translate (has an API key) and for which provider.
+export const setMemberMeta = (roomId: string, deviceId: string, meta: { hasKey: boolean; provider: string }): void => {
+  const d = getDb();
+  if (!d) return;
+  update(ref(d, `rooms/${roomId}/members/${deviceId}`), meta).catch(() => {});
+};
+
 // Send a start/stop command to another device in the room.
 export const sendCommand = (roomId: string, targetDeviceId: string, action: 'start' | 'stop', from: string): void => {
   const d = getDb();
@@ -111,13 +118,19 @@ export const leavePresence = (roomId: string, deviceId: string): void => {
 
 export const subscribeMembers = (
   roomId: string,
-  cb: (members: { id: string; label: string; recording: boolean }[]) => void,
+  cb: (members: { id: string; label: string; recording: boolean; hasKey: boolean; provider: string }[]) => void,
 ): (() => void) => {
   const d = getDb();
   if (!d) return () => {};
   return onValue(ref(d, `rooms/${roomId}/members`), (snap) => {
     const val = snap.val() || {};
-    cb(Object.keys(val).map((id) => ({ id, label: val[id]?.label || '裝置', recording: !!val[id]?.recording })));
+    cb(Object.keys(val).map((id) => ({
+      id,
+      label: val[id]?.label || '裝置',
+      recording: !!val[id]?.recording,
+      hasKey: !!val[id]?.hasKey,
+      provider: val[id]?.provider || '',
+    })));
   });
 };
 
