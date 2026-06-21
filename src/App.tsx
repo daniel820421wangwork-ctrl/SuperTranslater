@@ -1888,7 +1888,8 @@ export default function App() {
         {someoneRecording && visibleBlocks.voiceControls ? (
           /* ===== Continuous full transcript (recording) ===== */
           <div className="flex flex-col h-full min-h-0">
-            <div className="flex items-center justify-between mb-3 flex-none">
+            {/* pr-24 on mobile keeps the stop button clear of the top-right floating header */}
+            <div className="flex items-center justify-between mb-3 flex-none pr-24 sm:pr-0">
               <div className="flex items-center gap-2 min-w-0">
                 <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
                 <div className="min-w-0">
@@ -2197,7 +2198,7 @@ export default function App() {
 
         {/* Right Side: Finalized Timeline (對話時間軸歷史記錄) */}
         {visibleBlocks.timeline && (
-        <section className="flex-1 min-w-0 min-h-[65vh] lg:min-h-0 bg-white p-3 pt-9 sm:p-3.5 sm:pt-9 md:p-4.5 md:pt-9 flex flex-col overflow-hidden relative">
+        <section className="flex-1 min-w-0 min-h-[65vh] lg:min-h-0 bg-white p-3 sm:p-3.5 md:p-4.5 lg:pt-9 flex flex-col overflow-hidden relative">
           
           <div className="flex-none flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2 border-b border-zinc-100 pb-2">
             <div>
