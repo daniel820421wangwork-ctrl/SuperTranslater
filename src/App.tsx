@@ -8,7 +8,7 @@ import {
   Edit, ArrowUp, Menu, GripVertical, Wifi, Users
 } from 'lucide-react';
 import { cn } from './lib/utils';
-import { isFirebaseConfigured } from './firebaseConfig';
+import { isFirebaseConfigured, parseFirebaseConfig, saveFirebaseConfig, clearFirebaseConfig } from './firebaseConfig';
 import {
   pushSegment, updateSegment, clearRoomSegments, subscribeSegments,
   joinPresence, leavePresence, subscribeMembers, subscribeConnection,
@@ -351,6 +351,7 @@ export default function App() {
   const [roomConnected, setRoomConnected] = useState(false);
   const [isRoomOpen, setIsRoomOpen] = useState(false);
   const [joinCodeInput, setJoinCodeInput] = useState('');
+  const [fbConfigInput, setFbConfigInput] = useState('');
   const roomIdRef = useRef<string | null>(null);
   const deviceIdRef = useRef<string>(getDeviceId());
   const deviceLabelRef = useRef<string>(detectDeviceLabel());
@@ -1933,8 +1934,36 @@ export default function App() {
                 </div>
 
                 {!isFirebaseConfigured() ? (
-                  <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-[12px] text-amber-800 leading-relaxed">
-                    尚未設定 Firebase。請依說明在 Firebase 建立專案與 Realtime Database，並把 config 貼給開發者填入 <code className="font-mono">src/firebaseConfig.ts</code>，多裝置連線才能啟用。
+                  <div className="space-y-3">
+                    <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-[11.5px] text-amber-800 leading-relaxed space-y-1.5">
+                      <p className="font-bold">啟用多裝置連線需要你自己的 Firebase（一次性設定，免費）：</p>
+                      <p>1. 到 <span className="font-mono">console.firebase.google.com</span> 建立專案</p>
+                      <p>2. 「建構 → Realtime Database」→ 建立資料庫（測試模式）</p>
+                      <p>3. 專案設定 → 你的應用程式 → 點 <span className="font-mono">&lt;/&gt;</span> 註冊 Web App</p>
+                      <p>4. 把它給的整段 <span className="font-mono">firebaseConfig = {`{...}`}</span> 貼到下面</p>
+                    </div>
+                    <textarea
+                      value={fbConfigInput}
+                      onChange={(e) => setFbConfigInput(e.target.value)}
+                      placeholder={'貼上整段，例如：\nconst firebaseConfig = {\n  apiKey: "AIza...",\n  databaseURL: "https://xxx.firebasedatabase.app",\n  ...\n};'}
+                      rows={7}
+                      className="w-full p-3 bg-zinc-50 border border-zinc-200 rounded-xl text-[11px] font-mono outline-none focus:border-indigo-500 resize-none"
+                    />
+                    <button
+                      onClick={() => {
+                        const cfg = parseFirebaseConfig(fbConfigInput);
+                        if (!cfg) {
+                          addToast('解析失敗：請確認貼上的內容含 apiKey 與 databaseURL（需先建立 Realtime Database）。', 'error');
+                          return;
+                        }
+                        saveFirebaseConfig(cfg);
+                        addToast('Firebase 設定已儲存，重新整理套用…', 'success');
+                        setTimeout(() => window.location.reload(), 800);
+                      }}
+                      className="w-full px-3 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl"
+                    >
+                      儲存並啟用
+                    </button>
                   </div>
                 ) : roomId ? (
                   <div className="space-y-4">
@@ -2015,6 +2044,19 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+                )}
+
+                {isFirebaseConfigured() && !roomId && (
+                  <button
+                    onClick={() => {
+                      clearFirebaseConfig();
+                      addToast('已清除 Firebase 設定，重新整理…', 'info');
+                      setTimeout(() => window.location.reload(), 600);
+                    }}
+                    className="text-[10px] text-zinc-400 hover:text-red-500 underline self-start"
+                  >
+                    重新設定 / 更換 Firebase
+                  </button>
                 )}
               </div>
             </motion.div>

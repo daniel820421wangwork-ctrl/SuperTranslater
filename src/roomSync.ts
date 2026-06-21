@@ -6,7 +6,7 @@ import {
   getDatabase, ref, push, update, remove, set,
   onChildAdded, onChildChanged, onValue, onDisconnect, type Database,
 } from 'firebase/database';
-import { firebaseConfig, isFirebaseConfigured } from './firebaseConfig';
+import { loadFirebaseConfig } from './firebaseConfig';
 
 export type RoomSegment = {
   original: string;
@@ -19,9 +19,10 @@ export type RoomSegment = {
 let db: Database | null = null;
 
 const getDb = (): Database | null => {
-  if (!isFirebaseConfigured()) return null;
+  const cfg = loadFirebaseConfig();
+  if (!cfg) return null;
   try {
-    if (!getApps().length) initializeApp(firebaseConfig);
+    if (!getApps().length) initializeApp(cfg);
     if (!db) db = getDatabase();
     return db;
   } catch (e) {
