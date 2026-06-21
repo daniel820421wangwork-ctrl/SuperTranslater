@@ -520,7 +520,7 @@ export default function App() {
   }, [visibleBlocks]);
 
   const transFontPx = TRANS_FONT_SIZES[transSizeIdx].px;
-  const showLeftPanel = visibleBlocks.voiceControls || visibleBlocks.sessionMemory || visibleBlocks.speechDiagnostics;
+  const showLeftPanel = visibleBlocks.voiceControls || visibleBlocks.speechDiagnostics;
   const toggleVisibleBlock = (block: keyof VisibleBlocks) => {
     setVisibleBlocks((current) => ({ ...current, [block]: !current[block] }));
   };
@@ -1680,7 +1680,7 @@ export default function App() {
   }, [history, interimTranscript, someoneRecording]);
 
   return (
-    <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 flex flex-col lg:h-screen overflow-x-hidden lg:overflow-hidden">
+    <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 flex flex-col lg:h-screen overflow-x-hidden lg:overflow-hidden pt-11">
       
       {/* Toast Notification System */}
       <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] flex flex-col gap-2 w-full max-w-sm px-4 pointer-events-none">
@@ -1705,19 +1705,16 @@ export default function App() {
         </AnimatePresence>
       </div>
 
-      {/* Top Application Header (slim bar + hamburger menu) */}
-      <header className="sticky top-0 lg:relative bg-white border-b border-zinc-200 px-3 sm:px-6 py-2.5 sm:py-3 shadow-sm z-40 flex-none">
+      {/* Top Application Header (floating transparent bar) */}
+      <header className="fixed top-0 left-0 right-0 bg-white/70 backdrop-blur-md border-b border-zinc-200/40 px-3 sm:px-6 py-2 z-40">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-100 flex-shrink-0">
-              <Zap className="w-5 h-5 text-white fill-white animate-pulse" />
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 bg-indigo-600 rounded-lg flex items-center justify-center shadow-sm flex-shrink-0">
+              <Zap className="w-4 h-4 text-white fill-white" />
             </div>
-            <div>
-              <h1 className="text-md font-extrabold tracking-tight text-zinc-800 flex items-center gap-1.5">
-                SwiftTranscript <span className="text-indigo-600 font-bold">⚡</span>
-              </h1>
-              <p className="text-[10px] text-zinc-400 font-medium">即時法醫級語音翻譯與口音特徵比對器</p>
-            </div>
+            <h1 className="text-sm font-extrabold tracking-tight text-zinc-700 flex items-center gap-1">
+              SwiftTranscript <span className="text-indigo-600">⚡</span>
+            </h1>
           </div>
 
           {/* Hamburger trigger */}
@@ -1726,14 +1723,14 @@ export default function App() {
             aria-label="開啟選單"
             aria-expanded={isMenuOpen}
             className={cn(
-              "flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-bold transition-all",
+              "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-bold transition-all",
               isMenuOpen
                 ? "bg-indigo-600 border-indigo-700 text-white shadow-md"
-                : "bg-zinc-100 border-zinc-200 text-zinc-700 hover:bg-zinc-200"
+                : "bg-white/60 border-zinc-200/60 text-zinc-600 hover:bg-white"
             )}
           >
-            {isMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
-            <span className="hidden sm:inline">選單</span>
+            {isMenuOpen ? <X className="w-3.5 h-3.5" /> : <Menu className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline text-[11px]">選單</span>
           </button>
         </div>
 
@@ -1802,7 +1799,6 @@ export default function App() {
                   <div className="grid grid-cols-2 gap-1.5">
                     {([
                       ['voiceControls', '語音控制'],
-                      ['sessionMemory', '情境記憶'],
                       ['speechDiagnostics', '語音提示'],
                       ['timeline', '翻譯時間軸'],
                     ] as [keyof VisibleBlocks, string][]).map(([key, label]) => (
@@ -2135,130 +2131,7 @@ export default function App() {
             )}
           </div>
 
-          <div className="bg-white border border-zinc-200/80 rounded-3xl p-4 sm:p-5 shadow-sm space-y-2.5">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-[10px] text-zinc-400 font-mono uppercase">Manual Input</p>
-                <p className="text-xs font-black text-zinc-700 mt-0.5">手動輸入英文</p>
-              </div>
-              <span className="text-[9px] text-zinc-400 hidden sm:inline">Ctrl / ⌘ + Enter 送出</span>
-            </div>
-            <textarea
-              value={manualInputText}
-              onChange={(e) => setManualInputText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-                  e.preventDefault();
-                  void submitManualText();
-                }
-              }}
-              rows={3}
-              placeholder="貼上或輸入英文內容，即使麥克風無法使用也能翻譯與分析。"
-              className="w-full min-h-20 resize-y rounded-2xl border border-zinc-200 bg-zinc-50 p-3 text-sm leading-relaxed outline-none transition focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-500/10"
-            />
-            <button
-              type="button"
-              onClick={() => void submitManualText()}
-              disabled={!manualInputText.trim()}
-              className="w-full sm:w-auto sm:ml-auto px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center gap-1.5"
-            >
-              <ArrowRightLeft className="w-3.5 h-3.5" /> 送出翻譯與分析
-            </button>
-          </div>
           </>
-          )}
-
-          {/* Dedicated Session Memory & Auto-Recommendation Widget */}
-          {visibleBlocks.sessionMemory && (
-          <div className="bg-white border border-zinc-200/80 rounded-3xl p-5 shadow-sm space-y-3.5 shrink-0">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-[10px] text-zinc-400 font-mono uppercase">Session Memory</p>
-                <p className="text-xs font-black text-zinc-700 flex items-center gap-1.5 mt-0.5">
-                  <Brain className="w-4 h-4 text-indigo-500" />
-                  AI 記憶大綱設定
-                </p>
-              </div>
-              <button
-                onClick={() => setIsMemoryOpen(true)}
-                className="text-[10px] font-extrabold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-2.5 py-1.5 rounded-lg transition-all"
-              >
-                配置記憶
-              </button>
-            </div>
-
-            {/* Current Active Preset display */}
-            <div className="p-3 bg-zinc-50 rounded-2xl border border-zinc-100/80 flex items-start gap-2.5">
-              <span className="text-xl leading-none flex items-center justify-center p-2 bg-white rounded-xl border border-zinc-200/60 shadow-sm shrink-0">
-                {(() => {
-                  const currentPreset = CONTEXT_PRESETS.find(p => p.text === sessionContext);
-                  return currentPreset ? currentPreset.icon : '📝';
-                })()}
-              </span>
-              <div className="space-y-0.5 min-w-0">
-                <span className="text-[11px] font-black text-zinc-700 block">
-                  {(() => {
-                    const currentPreset = CONTEXT_PRESETS.find(p => p.text === sessionContext);
-                    return currentPreset ? currentPreset.label : '自訂情境資料庫';
-                  })()}
-                </span>
-                <p className="text-[10px] text-zinc-450 truncate leading-snug">
-                  {sessionContext || '目前尚未設置任何專業背景記憶大綱。'}
-                </p>
-              </div>
-            </div>
-
-            {/* Live Recommendation Matcher */}
-            {(() => {
-              const fullSpeechText = history.map(h => h.original).join(' ') + ' ' + liveDraftTranscript + ' ' + interimTranscript;
-              const { recommendedId, matchedWords } = analyzeSessionMemory(fullSpeechText);
-              const currentPreset = CONTEXT_PRESETS.find(p => p.text === sessionContext);
-              const recPreset = CONTEXT_PRESETS.find(p => p.id === recommendedId);
-
-              const isActiveProfileRec = currentPreset && currentPreset.id === recommendedId;
-              const hasText = fullSpeechText.trim().length > 3;
-
-              if (recPreset && !isActiveProfileRec && hasText) {
-                return (
-                  <motion.div 
-                    initial={{ opacity: 0, scale: 0.98 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    className="p-3 bg-gradient-to-r from-violet-50 to-indigo-50 rounded-2xl border border-indigo-150 flex flex-col gap-2 shadow-inner"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-[9px] font-black text-violet-700 flex items-center gap-1">
-                        <Sparkles className="w-3.5 h-3.5 text-violet-500 fill-violet-200 animate-spin" />
-                        AI 偵測主題推薦
-                      </span>
-                      <span className="text-[8px] bg-white text-indigo-500 border border-indigo-100 px-1.5 py-0.5 rounded font-mono font-bold">
-                        匹配
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-zinc-650 leading-relaxed">
-                      語音中包含「<strong>{matchedWords.slice(0, 3).join(', ')}</strong>」等關鍵術語。建議切換至「<strong>{recPreset.label}</strong>」記憶背景以健全翻譯。
-                    </p>
-                    <button
-                      onClick={() => {
-                        setSessionContext(recPreset.text);
-                        addToast(`已自動轉換對話記憶為：${recPreset.label}`, 'success');
-                      }}
-                      className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[10px] py-1.5 rounded-xl transition-all shadow-md shadow-indigo-100"
-                    >
-                      一鍵切換記憶：{recPreset.icon} {recPreset.label}
-                    </button>
-                  </motion.div>
-                );
-              } else if (hasText && recPreset) {
-                return (
-                  <div className="flex items-center gap-2 text-emerald-600 bg-emerald-50/50 border border-emerald-100 p-2.5 rounded-2xl text-[10px]">
-                    <Check className="w-4 h-4 text-emerald-500 flex-shrink-0" />
-                    <span>AI 當前匹配率優良：<strong>{recPreset.label}</strong></span>
-                  </div>
-                );
-              }
-              return null;
-            })()}
-          </div>
           )}
 
           {/* Browser Speech Compatibility Tips */}
