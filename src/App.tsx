@@ -1085,17 +1085,37 @@ export default function App() {
     return () => unsub();
   }, [roomId, addToast]);
 
-  // Does this device hold a usable API key for its selected provider?
-  const hasUsableKey = useMemo(() => {
-    if (aiSettings.provider === 'openai') return !!aiSettings.openaiKey;
-    if (aiSettings.provider === 'claude') return !!aiSettings.claudeKey;
-    return !!aiSettings.geminiKey;
+  // Pick a provider this device can actually translate with: prefer the
+  // selected engine if it has a key, otherwise fall back to ANY key the
+  // device holds. This way "has a key" doesn't depend on the chosen engine.
+  const keyInfo = useMemo(() => {
+    const s = aiSettings;
+    const opts: { provider: 'openai' | 'claude' | 'gemini'; key: string; model: string }[] = [
+      { provider: 'openai', key: s.openaiKey, model: s.openaiModel },
+      { provider: 'claude', key: s.claudeKey, model: s.claudeModel },
+      { provider: 'gemini', key: s.geminiKey, model: s.geminiModel },
+    ];
+    const selected = opts.find(o => o.provider === s.provider && o.key);
+    return selected || opts.find(o => o.key) || null;
   }, [aiSettings]);
+  const hasUsableKey = !!keyInfo;
+  const keyInfoRef = useRef(keyInfo);
+  useEffect(() => { keyInfoRef.current = keyInfo; });
 
-  // Publish this device's key availability + provider to the room.
+  // Translate a piece of text with a specific provider/key (room translator path).
+  const translateWith = useCallback(async (info: NonNullable<typeof keyInfo>, text: string): Promise<string> => {
+    const sys = 'You are a professional translator. Translate the English into natural, fluent Traditional Chinese (Taiwan style). Return ONLY the translated Chinese — no quotes, no JSON, no explanation.';
+    if (info.provider === 'openai') return (await callOpenAI(info.key, info.model, text, sys)).trim();
+    if (info.provider === 'claude') return (await callClaude(info.key, info.model, text, sys)).trim();
+    const client = getGeminiClient(info.key);
+    const r = await client.models.generateContent({ model: info.model, contents: text, config: { systemInstruction: sys } });
+    return (r.text || '').trim();
+  }, [getGeminiClient]);
+
+  // Publish this device's key availability + the provider it would translate with.
   useEffect(() => {
-    if (roomId) setMemberMeta(roomId, deviceIdRef.current, { hasKey: hasUsableKey, provider: aiSettings.provider });
-  }, [roomId, hasUsableKey, aiSettings.provider]);
+    if (roomId) setMemberMeta(roomId, deviceIdRef.current, { hasKey: hasUsableKey, provider: keyInfo?.provider || '' });
+  }, [roomId, hasUsableKey, keyInfo]);
 
   // Deterministically elect one key-holding device as the room's translator
   // (smallest id), so every device agrees on who translates.
@@ -1105,19 +1125,27 @@ export default function App() {
   }, [roomMembers]);
 
   // If this device is the elected translator, translate any untranslated
-  // segments in the room and sync the result.
+  // segments in the room and sync the result (with error fallback so a failed
+  // call never leaves a segment stuck on "翻譯中").
   const translatingKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!roomIdRef.current || !activeTranslator || activeTranslator.id !== deviceIdRef.current) return;
+    const info = keyInfoRef.current;
+    if (!info) return;
     for (const h of history) {
       if ((h.translated === undefined || h.translated === null || h.translated === '') && !translatingKeysRef.current.has(h.id)) {
         translatingKeysRef.current.add(h.id);
-        Promise.resolve(translateSegmentRef.current(h.original))
-          .then((t) => { if (roomIdRef.current) updateSegment(roomIdRef.current, h.id, { translated: t }); })
-          .finally(() => translatingKeysRef.current.delete(h.id));
+        const segId = h.id;
+        translateWith(info, h.original)
+          .then((t) => { if (roomIdRef.current) updateSegment(roomIdRef.current, segId, { translated: t || '[翻譯失敗]' }); })
+          .catch((e) => {
+            console.error('room translate failed', e);
+            if (roomIdRef.current) updateSegment(roomIdRef.current, segId, { translated: '[翻譯失敗，請檢查該裝置的 API 金鑰]' });
+          })
+          .finally(() => translatingKeysRef.current.delete(segId));
       }
     }
-  }, [history, activeTranslator]);
+  }, [history, activeTranslator, translateWith]);
 
   const submitManualText = async () => {
     const text = manualInputText.trim();
