@@ -363,7 +363,7 @@ export default function App() {
 
   // ===== Multi-device room sync =====
   const [roomId, setRoomId] = useState<string | null>(null);
-  const [roomMembers, setRoomMembers] = useState<{ id: string; label: string; recording: boolean; hasKey: boolean; provider: string }[]>([]);
+  const [roomMembers, setRoomMembers] = useState<{ id: string; label: string; recording: boolean; hasKey: boolean; provider: string; recMode: string }[]>([]);
   const [roomConnected, setRoomConnected] = useState(false);
   const [isRoomOpen, setIsRoomOpen] = useState(false);
   const [joinCodeInput, setJoinCodeInput] = useState('');
@@ -869,10 +869,17 @@ export default function App() {
     const merged = concatFloat32(chunks);
     const audio = resampleTo16k(merged, audioCtxRef.current.sampleRate);
     if (audio.length < WHISPER_SAMPLE_RATE * 0.3) return; // ignore <0.3s blips
+    // Normalize amplitude so quiet mics get boosted to a consistent level
+    // (capped to avoid over-amplifying background noise).
+    let peak = 0;
+    for (let i = 0; i < audio.length; i++) { const a = Math.abs(audio[i]); if (a > peak) peak = a; }
+    if (peak > 0.001) {
+      const gain = Math.min(8, 0.95 / peak);
+      if (gain > 1.05) for (let i = 0; i < audio.length; i++) audio[i] *= gain;
+    }
     const id = ++whisperJobRef.current;
-    const lang = selectedLang.startsWith('en') ? 'english' : 'english';
-    whisperWorkerRef.current?.postMessage({ type: 'transcribe', id, audio, language: lang }, [audio.buffer]);
-  }, [selectedLang]);
+    whisperWorkerRef.current?.postMessage({ type: 'transcribe', id, audio, language: 'english' }, [audio.buffer]);
+  }, []);
 
   const stopWhisperRecording = useCallback(() => {
     shouldKeepRecordingRef.current = false;
@@ -902,7 +909,14 @@ export default function App() {
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        } as MediaTrackConstraints,
+      });
       mediaStreamRef.current = stream;
       const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
       audioCtxRef.current = ctx;
@@ -1112,11 +1126,29 @@ export default function App() {
   const startRecordingRef = useRef(startRecording);
   const stopRecordingRef = useRef(stopRecording);
   useEffect(() => { startRecordingRef.current = startRecording; stopRecordingRef.current = stopRecording; });
+  const recognitionModeRef = useRef(recognitionMode);
+  useEffect(() => { recognitionModeRef.current = recognitionMode; });
 
-  // Report this device's recording state to the room.
+  // A remote "start" may request a mode; we begin once that engine is ready.
+  const pendingStartRef = useRef<'live' | 'whisper' | null>(null);
+  const tryStartPending = useCallback(() => {
+    const want = pendingStartRef.current;
+    if (!want || isActualRecordingRef.current) return;
+    if (recognitionModeRef.current !== want) return;           // wait for the mode switch to apply
+    if (want === 'whisper' && !whisperReadyRef.current) return; // wait for the model to load
+    pendingStartRef.current = null;
+    startRecordingRef.current();
+  }, []);
+  // Retry the pending start when the mode applies or Whisper finishes loading.
+  useEffect(() => { tryStartPending(); }, [recognitionMode, whisperState, tryStartPending]);
+
+  // Report this device's recording state + current recognition mode to the room.
   useEffect(() => {
     if (roomId) setMemberRecording(roomId, deviceIdRef.current, isRecording);
   }, [isRecording, roomId]);
+  useEffect(() => {
+    if (roomId) setMemberMeta(roomId, deviceIdRef.current, { recMode: recognitionMode });
+  }, [roomId, recognitionMode]);
 
   // Obey start/stop commands sent from other devices in the room.
   useEffect(() => {
@@ -1126,15 +1158,19 @@ export default function App() {
       if (cmd.ts <= lastTs) return; // ignore the pre-existing/stale command
       lastTs = cmd.ts;
       if (cmd.action === 'start') {
-        startRecordingRef.current();
-        addToast(`${cmd.from} 要求本機開始收音`, 'info');
+        const mode = cmd.mode === 'whisper' ? 'whisper' : cmd.mode === 'live' ? 'live' : recognitionModeRef.current;
+        pendingStartRef.current = mode;
+        if (mode !== recognitionModeRef.current) setRecognitionMode(mode);
+        setTimeout(() => tryStartPending(), 0); // covers the already-in-mode case
+        addToast(`${cmd.from} 要求本機開始收音（${mode === 'whisper' ? '高精準' : '即時'}）`, 'info');
       } else if (cmd.action === 'stop') {
+        pendingStartRef.current = null;
         stopRecordingRef.current();
         addToast(`${cmd.from} 要求本機停止收音`, 'info');
       }
     });
     return () => unsub();
-  }, [roomId, addToast]);
+  }, [roomId, addToast, tryStartPending]);
 
   // Pick a provider this device can actually translate with: prefer the
   // selected engine if it has a key, otherwise fall back to ANY key the
@@ -2251,6 +2287,7 @@ export default function App() {
                                 <span className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", m.recording ? "bg-red-500 animate-pulse" : "bg-zinc-300")} />
                                 <span className="truncate">{m.label}{isSelf ? '（本機）' : ''}</span>
                                 <span className="text-[10px] font-normal text-zinc-400">{m.recording ? '收音中' : '閒置'}</span>
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-500 whitespace-nowrap">{m.recMode === 'whisper' ? '🎯 高精準' : '⚡ 即時'}</span>
                                 {m.hasKey && (
                                   <span className={cn(
                                     "text-[9px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap",
@@ -2262,17 +2299,31 @@ export default function App() {
                                 )}
                               </span>
                               {!isSelf && (
-                                <button
-                                  onClick={() => sendCommand(roomId, m.id, m.recording ? 'stop' : 'start', deviceLabelRef.current)}
-                                  className={cn(
-                                    "shrink-0 text-[10px] font-bold px-2 py-1 rounded-md border transition-colors",
-                                    m.recording
-                                      ? "text-red-600 bg-red-50 border-red-100 hover:bg-red-100"
-                                      : "text-emerald-700 bg-emerald-50 border-emerald-100 hover:bg-emerald-100"
-                                  )}
-                                >
-                                  {m.recording ? '⏹ 停止收音' : '▶ 開始收音'}
-                                </button>
+                                m.recording ? (
+                                  <button
+                                    onClick={() => sendCommand(roomId, m.id, 'stop', deviceLabelRef.current)}
+                                    className="shrink-0 text-[10px] font-bold px-2 py-1 rounded-md border text-red-600 bg-red-50 border-red-100 hover:bg-red-100 transition-colors"
+                                  >
+                                    ⏹ 停止
+                                  </button>
+                                ) : (
+                                  <div className="flex gap-1 shrink-0">
+                                    <button
+                                      onClick={() => sendCommand(roomId, m.id, 'start', deviceLabelRef.current, 'live')}
+                                      title="遙控此裝置用即時模式收音"
+                                      className="text-[10px] font-bold px-1.5 py-1 rounded-md border text-indigo-600 bg-indigo-50 border-indigo-100 hover:bg-indigo-100 transition-colors"
+                                    >
+                                      ⚡ 即時
+                                    </button>
+                                    <button
+                                      onClick={() => sendCommand(roomId, m.id, 'start', deviceLabelRef.current, 'whisper')}
+                                      title="遙控此裝置用高精準(Whisper)模式收音"
+                                      className="text-[10px] font-bold px-1.5 py-1 rounded-md border text-emerald-700 bg-emerald-50 border-emerald-100 hover:bg-emerald-100 transition-colors"
+                                    >
+                                      🎯 高精準
+                                    </button>
+                                  </div>
+                                )
                               )}
                             </div>
                           );

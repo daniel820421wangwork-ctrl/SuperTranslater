@@ -83,25 +83,26 @@ export const setMemberRecording = (roomId: string, deviceId: string, recording: 
   update(ref(d, `rooms/${roomId}/members/${deviceId}`), { recording }).catch(() => {});
 };
 
-// Report whether this device can translate (has an API key) and for which provider.
-export const setMemberMeta = (roomId: string, deviceId: string, meta: { hasKey: boolean; provider: string }): void => {
+// Report member metadata (translate capability/provider, current recording mode).
+export const setMemberMeta = (roomId: string, deviceId: string, meta: { hasKey?: boolean; provider?: string; recMode?: string }): void => {
   const d = getDb();
   if (!d) return;
   update(ref(d, `rooms/${roomId}/members/${deviceId}`), meta).catch(() => {});
 };
 
-// Send a start/stop command to another device in the room.
-export const sendCommand = (roomId: string, targetDeviceId: string, action: 'start' | 'stop', from: string): void => {
+// Send a start/stop command to another device. For 'start', an optional
+// recognition mode ('live' | 'whisper') tells the target how to record.
+export const sendCommand = (roomId: string, targetDeviceId: string, action: 'start' | 'stop', from: string, mode?: 'live' | 'whisper'): void => {
   const d = getDb();
   if (!d) return;
-  set(ref(d, `rooms/${roomId}/commands/${targetDeviceId}`), { action, ts: Date.now(), from }).catch(() => {});
+  set(ref(d, `rooms/${roomId}/commands/${targetDeviceId}`), { action, ts: Date.now(), from, mode: mode || null }).catch(() => {});
 };
 
 // Listen for commands addressed to this device.
 export const subscribeCommand = (
   roomId: string,
   deviceId: string,
-  cb: (cmd: { action: 'start' | 'stop'; ts: number; from: string }) => void,
+  cb: (cmd: { action: 'start' | 'stop'; ts: number; from: string; mode?: 'live' | 'whisper' | null }) => void,
 ): (() => void) => {
   const d = getDb();
   if (!d) return () => {};
@@ -119,7 +120,7 @@ export const leavePresence = (roomId: string, deviceId: string): void => {
 
 export const subscribeMembers = (
   roomId: string,
-  cb: (members: { id: string; label: string; recording: boolean; hasKey: boolean; provider: string }[]) => void,
+  cb: (members: { id: string; label: string; recording: boolean; hasKey: boolean; provider: string; recMode: string }[]) => void,
 ): (() => void) => {
   const d = getDb();
   if (!d) return () => {};
@@ -131,6 +132,7 @@ export const subscribeMembers = (
       recording: !!val[id]?.recording,
       hasKey: !!val[id]?.hasKey,
       provider: val[id]?.provider || '',
+      recMode: val[id]?.recMode || 'live',
     })));
   });
 };

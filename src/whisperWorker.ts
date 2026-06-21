@@ -37,6 +37,9 @@ self.onmessage = async (e: MessageEvent) => {
       const out = await transcriber(msg.audio, {
         language: msg.language || 'english',
         task: 'transcribe',
+        // Reduce repetition-loop hallucinations on short/quiet chunks.
+        no_repeat_ngram_size: 3,
+        temperature: 0,
       });
       const text = (Array.isArray(out) ? out[0]?.text : out?.text) || '';
       (self as any).postMessage({ type: 'result', id: msg.id, text: String(text).trim() });
