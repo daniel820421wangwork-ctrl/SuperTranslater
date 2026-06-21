@@ -5,9 +5,24 @@ import {
   Languages, Copy, Check, Info, Zap, Trash2, 
   ArrowRightLeft, Mic, MicOff, XCircle, StopCircle, 
   FileText, X, Sparkles, ListChecks, Sliders, Settings, Key, Globe, Brain, RefreshCw,
-  Edit, ArrowUp, Menu, GripVertical
+  Edit, ArrowUp, Menu, GripVertical, Wifi, Users
 } from 'lucide-react';
 import { cn } from './lib/utils';
+import { isFirebaseConfigured } from './firebaseConfig';
+import {
+  pushSegment, updateSegment, clearRoomSegments, subscribeSegments,
+  joinPresence, leavePresence, subscribeMembers, subscribeConnection,
+} from './roomSync';
+
+// Stable per-device identity + a human label for the multi-device timeline.
+const getDeviceId = (): string => {
+  let id = localStorage.getItem('swift_device_id');
+  if (!id) { id = Math.random().toString(36).slice(2, 10); localStorage.setItem('swift_device_id', id); }
+  return id;
+};
+const detectDeviceLabel = (): string =>
+  /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ? '📱 手機' : '💻 電腦';
+const makeRoomCode = (): string => Math.random().toString(36).slice(2, 7).toUpperCase();
 
 // Language configuration
 const LANGUAGES = [
@@ -233,7 +248,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   
   // History / Transcript State
-  const [history, setHistory] = useState<{id: string, original: string, translated?: string, timestamp: number}[]>([]);
+  const [history, setHistory] = useState<{id: string, original: string, translated?: string, timestamp: number, deviceLabel?: string, deviceId?: string}[]>([]);
   
   // Speech Recognition States
   const [isRecording, setIsRecording] = useState(false);
@@ -329,6 +344,17 @@ export default function App() {
   const whisperHasSpeechRef = useRef(false);
   const whisperLastVoiceRef = useRef(0);
   const whisperJobRef = useRef(0);
+
+  // ===== Multi-device room sync =====
+  const [roomId, setRoomId] = useState<string | null>(null);
+  const [roomMembers, setRoomMembers] = useState<{ id: string; label: string }[]>([]);
+  const [roomConnected, setRoomConnected] = useState(false);
+  const [isRoomOpen, setIsRoomOpen] = useState(false);
+  const [joinCodeInput, setJoinCodeInput] = useState('');
+  const roomIdRef = useRef<string | null>(null);
+  const deviceIdRef = useRef<string>(getDeviceId());
+  const deviceLabelRef = useRef<string>(detectDeviceLabel());
+  const roomUnsubsRef = useRef<Array<() => void>>([]);
 
   // Resizable left panel width (px), only used in the wide horizontal layout.
   const [leftWidth, setLeftWidth] = useState<number>(() => {
@@ -648,13 +674,95 @@ export default function App() {
   }, [recognitionMode]);
 
   // Push a finished transcript chunk into the timeline and translate it.
-  // Shared by both the Web Speech and Whisper engines.
+  // Shared by both the Web Speech and Whisper engines. In a multi-device room
+  // the segment is published to Firebase (and rendered via the room listener);
+  // solo, it goes straight into local state.
   const commitSegment = useCallback((text: string) => {
     const clean = text.trim();
     if (!clean) return;
-    const segmentId = Math.random().toString(36).substring(7);
-    setHistory(prev => [{ id: segmentId, original: clean, timestamp: Date.now() }, ...prev]);
-    translateSegmentRef.current(clean, segmentId);
+    if (roomIdRef.current && isFirebaseConfigured()) {
+      const key = pushSegment(roomIdRef.current, {
+        original: clean, translated: null,
+        deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current, ts: Date.now(),
+      });
+      // The creating device translates its own segment, then syncs the result.
+      Promise.resolve(translateSegmentRef.current(clean)).then((t) => {
+        if (key && roomIdRef.current) updateSegment(roomIdRef.current, key, { translated: t });
+      });
+    } else {
+      const segmentId = Math.random().toString(36).substring(7);
+      setHistory(prev => [{ id: segmentId, original: clean, timestamp: Date.now() }, ...prev]);
+      translateSegmentRef.current(clean, segmentId);
+    }
+  }, []);
+
+  // ===== Multi-device room join / leave =====
+  const leaveRoom = useCallback(() => {
+    roomUnsubsRef.current.forEach((fn) => { try { fn(); } catch {} });
+    roomUnsubsRef.current = [];
+    if (roomIdRef.current) leavePresence(roomIdRef.current, deviceIdRef.current);
+    roomIdRef.current = null;
+    setRoomId(null);
+    setRoomMembers([]);
+    setRoomConnected(false);
+    setHistory([]);
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('room');
+      window.history.replaceState({}, '', url.toString());
+    } catch {}
+  }, []);
+
+  const joinRoom = useCallback((code: string) => {
+    const id = code.trim().toUpperCase();
+    if (!id) return;
+    if (!isFirebaseConfigured()) {
+      addToast('尚未設定 Firebase，無法建立多裝置連線。', 'error');
+      return;
+    }
+    // tear down any previous room first
+    roomUnsubsRef.current.forEach((fn) => { try { fn(); } catch {} });
+    roomUnsubsRef.current = [];
+    setHistory([]);
+    roomIdRef.current = id;
+    setRoomId(id);
+
+    const offSeg = subscribeSegments(
+      id,
+      (key, seg) => setHistory(prev => {
+        if (prev.some(h => h.id === key)) return prev;
+        const next = [...prev, {
+          id: key, original: seg.original,
+          translated: seg.translated ?? undefined, timestamp: seg.ts,
+          deviceLabel: seg.deviceLabel, deviceId: seg.deviceId,
+        }];
+        next.sort((a, b) => b.timestamp - a.timestamp);
+        return next;
+      }),
+      (key, seg) => setHistory(prev => prev.map(h => h.id === key ? { ...h, translated: seg.translated ?? h.translated } : h)),
+    );
+    const offMembers = subscribeMembers(id, setRoomMembers);
+    const offConn = subscribeConnection(setRoomConnected);
+    roomUnsubsRef.current = [offSeg, offMembers, offConn];
+    joinPresence(id, deviceIdRef.current, deviceLabelRef.current);
+
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', id);
+      window.history.replaceState({}, '', url.toString());
+    } catch {}
+    addToast(`已加入房間 ${id}`, 'success');
+  }, [addToast]);
+
+  const createRoom = useCallback(() => joinRoom(makeRoomCode()), [joinRoom]);
+
+  // Auto-join a room from the URL (?room=CODE) on first load.
+  useEffect(() => {
+    try {
+      const code = new URL(window.location.href).searchParams.get('room');
+      if (code && isFirebaseConfigured()) joinRoom(code);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ===== In-browser Whisper engine =====
@@ -960,27 +1068,10 @@ export default function App() {
       return;
     }
 
-    setIsTranslating(true);
-    const segmentId = Math.random().toString(36).substring(7);
-    const newEntry = {
-      id: segmentId,
-      original: text,
-      timestamp: Date.now()
-    };
-    
-    // Add to history list immediately
-    setHistory(prev => [newEntry, ...prev]);
-    setManualInputText(''); // clear input
-
-    try {
-      await translateSegment(text, segmentId);
-      addToast('手動段落翻譯與口音特徵比對完成！', 'success');
-    } catch (err) {
-      console.error('Manual translate error:', err);
-      addToast('翻譯或分析發生意外錯誤。', 'error');
-    } finally {
-      setIsTranslating(false);
-    }
+    // Route through commitSegment so it syncs to the room when connected.
+    setManualInputText('');
+    commitSegment(text);
+    addToast('已送出，正在翻譯與口音比對…', 'info');
   };
 
   const handleSaveSegmentEdit = async (id: string) => {
@@ -1041,7 +1132,13 @@ export default function App() {
     setSummary('');
     setDetectedAccent(null);
     setError(null);
-    addToast('已成功清除所有記錄', 'success');
+    // In a room, clearing wipes the shared transcript for everyone.
+    if (roomIdRef.current && isFirebaseConfigured()) {
+      clearRoomSegments(roomIdRef.current);
+      addToast('已清除房間內所有裝置的記錄', 'success');
+    } else {
+      addToast('已成功清除所有記錄', 'success');
+    }
   };
 
   const handleForceStop = () => {
@@ -1178,6 +1275,17 @@ export default function App() {
                     className="w-full px-3 py-2.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-bold text-xs rounded-xl transition-all flex items-center gap-2 border border-indigo-100"
                   >
                     <FileText className="w-4 h-4" /> 整頁整理
+                  </button>
+                  <button
+                    onClick={() => { setIsRoomOpen(true); setIsMenuOpen(false); }}
+                    className={cn(
+                      "w-full px-3 py-2.5 font-bold text-xs rounded-xl transition-all flex items-center gap-2 border",
+                      roomId
+                        ? "text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border-emerald-100"
+                        : "text-zinc-700 bg-zinc-100 hover:bg-zinc-200 border-zinc-200/50"
+                    )}
+                  >
+                    <Wifi className="w-4 h-4" /> 多裝置連線{roomId ? `（房間 ${roomId} · ${roomMembers.length}）` : ''}
                   </button>
                   <button
                     onClick={() => { handleClear(); setIsMenuOpen(false); }}
@@ -1586,6 +1694,12 @@ export default function App() {
                           {/* Left-hand column: Metadata (Time + Quick Action button) */}
                           <div className="md:col-span-1.5 flex md:flex-col items-center md:items-start justify-between md:justify-start gap-1 text-[10px] text-zinc-400 font-mono h-full pt-0.5 shrink-0 select-none">
                             <span className="font-semibold text-zinc-400/80">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                            {entry.deviceLabel && (
+                              <span className={cn(
+                                "text-[9px] font-bold px-1.5 py-0.5 rounded-md whitespace-nowrap",
+                                entry.deviceId === deviceIdRef.current ? "bg-indigo-50 text-indigo-600" : "bg-emerald-50 text-emerald-600"
+                              )}>{entry.deviceLabel}</span>
+                            )}
                             <div className="flex md:flex-row gap-1 items-center md:mt-1 opacity-40 group-hover/entry:opacity-100 transition-opacity">
                               {!isEditing && (
                                 <button
@@ -1674,6 +1788,12 @@ export default function App() {
                                 English
                               </span>
                               <div className="flex items-center gap-1.5">
+                                {entry.deviceLabel && (
+                                  <span className={cn(
+                                    "text-[9px] font-bold px-1.5 py-0.5 rounded-md",
+                                    entry.deviceId === deviceIdRef.current ? "bg-indigo-50 text-indigo-600" : "bg-emerald-50 text-emerald-600"
+                                  )}>{entry.deviceLabel}</span>
+                                )}
                                 <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
                                 {!isEditing && (
                                   <button
@@ -1788,6 +1908,119 @@ export default function App() {
         </section>
 
       </main>
+
+      {/* MULTI-DEVICE ROOM MODAL */}
+      <AnimatePresence>
+        {isRoomOpen && (
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            onClick={() => setIsRoomOpen(false)}
+            className="fixed inset-0 z-[200] bg-zinc-950/40 backdrop-blur-sm flex items-center justify-center p-4 md:p-8"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 10 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto"
+            >
+              <div className="p-6 space-y-5">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-md font-extrabold text-zinc-800 flex items-center gap-2">
+                    <Wifi className="w-5 h-5 text-indigo-600" /> 多裝置即時連線
+                  </h2>
+                  <button onClick={() => setIsRoomOpen(false)} className="p-1.5 text-zinc-400 hover:text-zinc-700 rounded-lg hover:bg-zinc-100">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {!isFirebaseConfigured() ? (
+                  <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-[12px] text-amber-800 leading-relaxed">
+                    尚未設定 Firebase。請依說明在 Firebase 建立專案與 Realtime Database，並把 config 貼給開發者填入 <code className="font-mono">src/firebaseConfig.ts</code>，多裝置連線才能啟用。
+                  </div>
+                ) : roomId ? (
+                  <div className="space-y-4">
+                    <div className="text-center p-4 rounded-2xl bg-zinc-50 border border-zinc-200">
+                      <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">房間代碼</p>
+                      <p className="text-3xl font-black text-indigo-600 tracking-widest mt-1">{roomId}</p>
+                      <div className="flex items-center justify-center gap-1.5 mt-2 text-[11px] font-bold">
+                        <span className={cn("inline-block w-1.5 h-1.5 rounded-full", roomConnected ? "bg-green-500" : "bg-zinc-300")} />
+                        <span className={roomConnected ? "text-green-600" : "text-zinc-400"}>{roomConnected ? "已連線" : "連線中…"}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col items-center gap-2">
+                      <img
+                        alt="加入房間 QR"
+                        className="w-40 h-40 rounded-xl border border-zinc-200 bg-white"
+                        src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(`${window.location.origin}${window.location.pathname}?room=${roomId}`)}`}
+                      />
+                      <p className="text-[11px] text-zinc-500">手機掃描 QR，或用下方連結加入</p>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        const link = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+                        navigator.clipboard.writeText(link);
+                        addToast('已複製分享連結', 'success');
+                      }}
+                      className="w-full px-3 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2"
+                    >
+                      <Copy className="w-4 h-4" /> 複製分享連結
+                    </button>
+
+                    <div>
+                      <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+                        <Users className="w-3.5 h-3.5" /> 已連線裝置（{roomMembers.length}）
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {roomMembers.length === 0 ? (
+                          <span className="text-[11px] text-zinc-400">尚無其他裝置，請在另一台開啟連結</span>
+                        ) : roomMembers.map(m => (
+                          <span key={m.id} className={cn(
+                            "text-[11px] font-bold px-2 py-1 rounded-lg border",
+                            m.id === deviceIdRef.current ? "bg-indigo-50 text-indigo-700 border-indigo-100" : "bg-zinc-100 text-zinc-600 border-zinc-200"
+                          )}>
+                            {m.label}{m.id === deviceIdRef.current ? '（本機）' : ''}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button onClick={() => { leaveRoom(); }} className="w-full px-3 py-2.5 text-red-500 bg-red-50 hover:bg-red-100 font-bold text-xs rounded-xl border border-red-100">
+                      離開房間
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <p className="text-[12px] text-zinc-500 leading-relaxed">
+                      建立一個房間，手機和電腦加入同一個房間後，兩邊都能收音，內容會即時同步並標明來源裝置。
+                    </p>
+                    <button onClick={createRoom} className="w-full px-3 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm rounded-xl flex items-center justify-center gap-2">
+                      <Wifi className="w-4 h-4" /> 建立新房間
+                    </button>
+                    <div className="flex items-center gap-2">
+                      <div className="h-px flex-1 bg-zinc-100" /><span className="text-[10px] text-zinc-400">或加入現有房間</span><div className="h-px flex-1 bg-zinc-100" />
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        value={joinCodeInput}
+                        onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
+                        placeholder="輸入房間代碼"
+                        className="flex-1 p-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm font-mono tracking-widest outline-none focus:border-indigo-500"
+                      />
+                      <button
+                        onClick={() => { if (joinCodeInput.trim()) { joinRoom(joinCodeInput); setJoinCodeInput(''); } }}
+                        className="px-4 py-2.5 bg-zinc-800 hover:bg-zinc-900 text-white font-bold text-xs rounded-xl"
+                      >
+                        加入
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* SYSTEM SETTINGS MODAL / DIALOG */}
       <AnimatePresence>
