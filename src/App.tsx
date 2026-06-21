@@ -5,7 +5,7 @@ import {
   Languages, Copy, Check, Info, Zap, Trash2, 
   ArrowRightLeft, Mic, MicOff, XCircle, StopCircle, 
   FileText, X, Sparkles, ListChecks, Sliders, Settings, Key, Globe, Brain, RefreshCw,
-  Edit, ArrowUp, Menu, GripVertical, Wifi, Users
+  Edit, ArrowUp, Menu, GripVertical, Wifi, Users, LayoutDashboard, Eye, EyeOff
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import { isFirebaseConfigured, parseFirebaseConfig, saveFirebaseConfig, clearFirebaseConfig } from './firebaseConfig';
@@ -46,6 +46,19 @@ import { browserTranslate, browserTranslateAvailable } from './browserTranslate'
 import { MicVAD } from '@ricky0123/vad-web';
 
 type TranslateMode = 'ai' | 'browser';
+type VisibleBlocks = {
+  voiceControls: boolean;
+  sessionMemory: boolean;
+  speechDiagnostics: boolean;
+  timeline: boolean;
+};
+
+const DEFAULT_VISIBLE_BLOCKS: VisibleBlocks = {
+  voiceControls: true,
+  sessionMemory: true,
+  speechDiagnostics: true,
+  timeline: true,
+};
 
 // Stable per-device identity + a human label for the multi-device timeline.
 const getDeviceId = (): string => {
@@ -380,6 +393,14 @@ export default function App() {
   const [hasNewItems, setHasNewItems] = useState(false);
   const [isCompact, setIsCompact] = useState(true);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [visibleBlocks, setVisibleBlocks] = useState<VisibleBlocks>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('swift_visible_blocks') || '{}');
+      return { ...DEFAULT_VISIBLE_BLOCKS, ...saved };
+    } catch {
+      return DEFAULT_VISIBLE_BLOCKS;
+    }
+  });
   // Adjustable Chinese-translation font size (index into TRANS_FONT_SIZES).
   const [transSizeIdx, setTransSizeIdx] = useState<number>(() => {
     const n = Number(localStorage.getItem('swift_trans_font_idx'));
@@ -476,7 +497,15 @@ export default function App() {
     localStorage.setItem('swift_trans_font_idx', String(transSizeIdx));
   }, [transSizeIdx]);
 
+  useEffect(() => {
+    localStorage.setItem('swift_visible_blocks', JSON.stringify(visibleBlocks));
+  }, [visibleBlocks]);
+
   const transFontPx = TRANS_FONT_SIZES[transSizeIdx].px;
+  const showLeftPanel = visibleBlocks.voiceControls || visibleBlocks.sessionMemory || visibleBlocks.speechDiagnostics;
+  const toggleVisibleBlock = (block: keyof VisibleBlocks) => {
+    setVisibleBlocks((current) => ({ ...current, [block]: !current[block] }));
+  };
 
   // Drag the divider to resize the left console panel.
   const startPanelDrag = useCallback((e: React.MouseEvent) => {
@@ -1002,6 +1031,27 @@ export default function App() {
     }
   }, []);
 
+  const describeMicrophoneError = (error: unknown): { code: string; message: string } => {
+    const name = error instanceof DOMException ? error.name : error instanceof Error ? error.name : '';
+    const detail = error instanceof Error ? error.message : String(error);
+    if (!window.isSecureContext) {
+      return { code: 'insecure-context', message: '麥克風只能在 HTTPS 或 localhost 使用。請改用安全連線後再試。' };
+    }
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      return { code: 'not-allowed', message: '未取得麥克風權限。請在瀏覽器網址列的網站權限中允許麥克風，再重新啟動。' };
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+      return { code: 'no-device', message: '找不到可用的麥克風，請確認裝置已連接並由系統啟用。' };
+    }
+    if (name === 'NotReadableError' || name === 'TrackStartError') {
+      return { code: 'device-busy', message: '麥克風目前被其他程式占用。請關閉其他錄音或會議程式後再試。' };
+    }
+    if (/vad\.worklet|silero_vad|onnx|wasm|fetch/i.test(detail)) {
+      return { code: 'vad-assets', message: '語音偵測模型載入失敗，請重新整理頁面；若仍失敗，請檢查網路或部署資產。' };
+    }
+    return { code: name || 'start-failed', message: `麥克風啟動失敗${detail ? `：${detail}` : ''}` };
+  };
+
   const startWhisperRecording = useCallback(async () => {
     // In a room we only CAPTURE + relay clips (the transcriber needs the model,
     // not us). Solo, we transcribe locally, so the model must be ready first.
@@ -1011,9 +1061,16 @@ export default function App() {
     }
     if (vadRef.current) return; // already running
     try {
+      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+        throw new DOMException('Microphone access requires HTTPS or localhost', 'SecurityError');
+      }
+      const baseUrl = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
       // Silero VAD detects real speech and hands us each utterance at 16kHz.
       // redemptionFrames ≈ pause length (each frame ~32ms at 16kHz).
       const vad = await MicVAD.new({
+        baseAssetPath: `${baseUrl}vad-assets/`,
+        onnxWASMBasePath: `${baseUrl}ort-assets/`,
+        startOnLoad: false,
         positiveSpeechThreshold: vadThreshold,
         negativeSpeechThreshold: Math.max(0.1, vadThreshold - 0.15),
         redemptionFrames: Math.max(2, Math.round(whisperPauseMs / 32)),
@@ -1027,14 +1084,16 @@ export default function App() {
         onSpeechEnd: (audio: Float32Array) => { handleUtterance(audio); },
       } as any);
       vadRef.current = vad;
-      vad.start();
+      await vad.start();
       shouldKeepRecordingRef.current = true;
       isActualRecordingRef.current = true;
       setIsRecording(true);
       setSpeechErrorDetected(null);
     } catch (err) {
       console.error('VAD/mic error', err);
-      addToast('麥克風或語音偵測啟動失敗，請至下方手動輸入欄。', 'error');
+      const problem = describeMicrophoneError(err);
+      setSpeechErrorDetected(problem.code);
+      addToast(problem.message, 'error');
       stopWhisperRecording();
     }
   }, [addToast, handleUtterance, stopWhisperRecording, vadThreshold, whisperPauseMs]);
@@ -1440,7 +1499,7 @@ export default function App() {
   }, [history, interimTranscript, someoneRecording]);
 
   return (
-    <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 flex flex-col h-screen overflow-hidden">
+    <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 flex flex-col lg:h-screen overflow-x-hidden lg:overflow-hidden">
       
       {/* Toast Notification System */}
       <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] flex flex-col gap-2 w-full max-w-sm px-4 pointer-events-none">
@@ -1466,7 +1525,7 @@ export default function App() {
       </div>
 
       {/* Top Application Header (slim bar + hamburger menu) */}
-      <header className="bg-white border-b border-zinc-200 px-4 sm:px-6 py-3 shadow-sm z-40 flex-none relative">
+      <header className="sticky top-0 lg:relative bg-white border-b border-zinc-200 px-3 sm:px-6 py-2.5 sm:py-3 shadow-sm z-40 flex-none">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-100 flex-shrink-0">
@@ -1545,6 +1604,49 @@ export default function App() {
 
                 <div className="h-px bg-zinc-100" />
 
+                {/* User-selectable workspace blocks */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <LayoutDashboard className="w-3.5 h-3.5" /> 顯示區塊
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setVisibleBlocks(DEFAULT_VISIBLE_BLOCKS)}
+                      className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800"
+                    >
+                      全部顯示
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {([
+                      ['voiceControls', '語音控制'],
+                      ['sessionMemory', '情境記憶'],
+                      ['speechDiagnostics', '語音提示'],
+                      ['timeline', '翻譯時間軸'],
+                    ] as [keyof VisibleBlocks, string][]).map(([key, label]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => toggleVisibleBlock(key)}
+                        aria-pressed={visibleBlocks[key]}
+                        className={cn(
+                          "px-2.5 py-2 rounded-xl border text-[11px] font-bold flex items-center gap-1.5 transition-colors",
+                          visibleBlocks[key]
+                            ? "bg-indigo-50 border-indigo-100 text-indigo-700"
+                            : "bg-zinc-50 border-zinc-200 text-zinc-400"
+                        )}
+                      >
+                        {visibleBlocks[key] ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[9px] leading-relaxed text-zinc-400">設定會保存在此瀏覽器，下次開啟仍會沿用。</p>
+                </div>
+
+                <div className="h-px bg-zinc-100" />
+
                 {/* Actions */}
                 <div className="flex flex-col gap-1.5">
                   <button
@@ -1590,19 +1692,23 @@ export default function App() {
       </header>
 
       {/* Main Split-Screen Workspace */}
-      <main className="flex-1 flex flex-col lg:flex-row overflow-hidden max-w-7xl w-full mx-auto">
+      <main className="flex-1 flex flex-col lg:flex-row overflow-visible lg:overflow-hidden max-w-7xl w-full mx-auto">
 
         {/* Left Side: Live Console (控台) — resizable width on wide screens.
             While recording, it becomes a continuous full-transcript view. */}
+        {showLeftPanel && (
         <section
-          style={isWideLayout ? { width: leftWidth } : undefined}
+          style={isWideLayout && visibleBlocks.timeline ? { width: leftWidth } : undefined}
           className={cn(
             "w-full shrink-0 border-b lg:border-b-0 border-zinc-200/80 bg-zinc-50/60 flex flex-col z-10",
-            someoneRecording ? "p-4 overflow-hidden" : "p-6 gap-5 overflow-y-auto"
+            !visibleBlocks.timeline && "lg:flex-1",
+            someoneRecording && visibleBlocks.voiceControls
+              ? "p-3 sm:p-4 overflow-hidden min-h-[55vh] lg:min-h-0"
+              : "p-3 sm:p-5 lg:p-6 gap-4 lg:gap-5 overflow-visible lg:overflow-y-auto"
           )}
         >
 
-        {someoneRecording ? (
+        {someoneRecording && visibleBlocks.voiceControls ? (
           /* ===== Continuous full transcript (recording) ===== */
           <div className="flex flex-col h-full min-h-0">
             <div className="flex items-center justify-between mb-3 flex-none">
@@ -1639,6 +1745,8 @@ export default function App() {
             </div>
           </div>
         ) : (
+          <>
+          {visibleBlocks.voiceControls && (
           <>
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 animate-ping" />
@@ -1801,7 +1909,41 @@ export default function App() {
             )}
           </div>
 
+          <div className="bg-white border border-zinc-200/80 rounded-3xl p-4 sm:p-5 shadow-sm space-y-2.5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[10px] text-zinc-400 font-mono uppercase">Manual Input</p>
+                <p className="text-xs font-black text-zinc-700 mt-0.5">手動輸入英文</p>
+              </div>
+              <span className="text-[9px] text-zinc-400 hidden sm:inline">Ctrl / ⌘ + Enter 送出</span>
+            </div>
+            <textarea
+              value={manualInputText}
+              onChange={(e) => setManualInputText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                  e.preventDefault();
+                  void submitManualText();
+                }
+              }}
+              rows={3}
+              placeholder="貼上或輸入英文內容，即使麥克風無法使用也能翻譯與分析。"
+              className="w-full min-h-20 resize-y rounded-2xl border border-zinc-200 bg-zinc-50 p-3 text-sm leading-relaxed outline-none transition focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-500/10"
+            />
+            <button
+              type="button"
+              onClick={() => void submitManualText()}
+              disabled={!manualInputText.trim()}
+              className="w-full sm:w-auto sm:ml-auto px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 flex items-center justify-center gap-1.5"
+            >
+              <ArrowRightLeft className="w-3.5 h-3.5" /> 送出翻譯與分析
+            </button>
+          </div>
+          </>
+          )}
+
           {/* Dedicated Session Memory & Auto-Recommendation Widget */}
+          {visibleBlocks.sessionMemory && (
           <div className="bg-white border border-zinc-200/80 rounded-3xl p-5 shadow-sm space-y-3.5 shrink-0">
             <div className="flex items-center justify-between">
               <div>
@@ -1891,20 +2033,22 @@ export default function App() {
               return null;
             })()}
           </div>
+          )}
 
           {/* Browser Speech Compatibility Tips */}
-          {speechErrorDetected && (
+          {visibleBlocks.speechDiagnostics && speechErrorDetected && (
             <div className="bg-amber-50/80 border border-amber-200/60 p-4 rounded-3xl text-[11px] text-amber-800 leading-relaxed shadow-sm">
               💡 <strong>麥克風/語音連線提示：</strong>
-              <span className="block mt-1">偵測到瀏覽器語音聽寫限制 ({speechErrorDetected === 'network' ? '網路語音伺服器連線中斷/受限' : `狀態: ${speechErrorDetected}`})。別擔心！請直接在右側對話歷史清單中，對任何對話段落點擊<strong>「手動修正」</strong>重新整理儲存，AI 同樣能為您生成翻譯。</span>
+              <span className="block mt-1">偵測到語音輸入限制（{speechErrorDetected === 'network' ? '網路語音服務中斷' : speechErrorDetected}）。請依上方錯誤提示檢查 HTTPS、網站麥克風權限及其他錄音程式；也可暫時使用手動輸入。</span>
             </div>
           )}
           </>
         )}
         </section>
+        )}
 
         {/* Draggable divider — only in the side-by-side layout */}
-        {isWideLayout && (
+        {isWideLayout && showLeftPanel && visibleBlocks.timeline && (
           <div
             onMouseDown={startPanelDrag}
             role="separator"
@@ -1919,9 +2063,10 @@ export default function App() {
         )}
 
         {/* Right Side: Finalized Timeline (對話時間軸歷史記錄) - Completely Unobstructed! */}
-        <section className="flex-1 min-w-0 bg-white p-3.5 md:p-4.5 flex flex-col overflow-hidden relative">
+        {visibleBlocks.timeline && (
+        <section className="flex-1 min-w-0 min-h-[65vh] lg:min-h-0 bg-white p-3 sm:p-3.5 md:p-4.5 flex flex-col overflow-hidden relative">
           
-          <div className="flex-none flex items-center justify-between mb-2 border-b border-zinc-100 pb-2">
+          <div className="flex-none flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2 border-b border-zinc-100 pb-2">
             <div>
               <h2 className="text-sm font-bold text-zinc-805 flex items-center gap-1.5">
                 <ListChecks className="w-4 h-4 text-indigo-600" />
@@ -1932,7 +2077,7 @@ export default function App() {
               </p>
             </div>
             
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
               {/* Compact / Comfortable density toggle (segmented control) */}
               <div
                 className="flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-200 bg-zinc-100 text-[10px] font-extrabold select-none"
@@ -2247,6 +2392,24 @@ export default function App() {
             )}
           </AnimatePresence>
         </section>
+        )}
+
+        {!showLeftPanel && !visibleBlocks.timeline && (
+          <div className="flex-1 min-h-[60vh] flex items-center justify-center p-6">
+            <div className="max-w-sm text-center bg-white border border-zinc-200 rounded-3xl p-6 shadow-sm">
+              <EyeOff className="w-10 h-10 mx-auto text-zinc-300 mb-3" />
+              <h2 className="font-extrabold text-zinc-700">目前所有區塊都已隱藏</h2>
+              <p className="text-xs text-zinc-400 mt-1 mb-4">可從右上角選單重新選擇要顯示的工作區塊。</p>
+              <button
+                type="button"
+                onClick={() => setVisibleBlocks(DEFAULT_VISIBLE_BLOCKS)}
+                className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700"
+              >
+                恢復預設顯示
+              </button>
+            </div>
+          </div>
+        )}
 
       </main>
 
@@ -2263,7 +2426,7 @@ export default function App() {
               onClick={(e) => e.stopPropagation()}
               className="bg-white rounded-3xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto"
             >
-              <div className="p-6 space-y-5">
+              <div className="p-4 sm:p-6 space-y-5">
                 <div className="flex items-center justify-between">
                   <h2 className="text-md font-extrabold text-zinc-800 flex items-center gap-2">
                     <Wifi className="w-5 h-5 text-indigo-600" /> 多裝置即時連線
@@ -2516,7 +2679,7 @@ export default function App() {
               className="bg-white w-full max-w-xl rounded-3xl shadow-2xl flex flex-col overflow-hidden max-h-[90vh]"
             >
               {/* Header */}
-              <div className="flex-none p-6 border-b border-zinc-100 flex items-center justify-between">
+              <div className="flex-none p-4 sm:p-6 border-b border-zinc-100 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <Sliders className="w-5 h-5 text-indigo-600 animate-pulse" />
                   <div>
@@ -2533,7 +2696,7 @@ export default function App() {
               </div>
 
               {/* Toggle Subtabs */}
-              <div className="flex-none px-6 py-2 bg-zinc-50/50 border-b border-zinc-100 flex gap-1">
+              <div className="flex-none px-3 sm:px-6 py-2 bg-zinc-50/50 border-b border-zinc-100 flex flex-wrap gap-1">
                 <button
                   type="button"
                   onClick={() => setSettingsTab('speech')}
@@ -2557,7 +2720,7 @@ export default function App() {
               </div>
 
               {/* Forms Body scrollable */}
-              <div className="flex-1 p-6 overflow-y-auto space-y-5 custom-scrollbar">
+              <div className="flex-1 p-4 sm:p-6 overflow-y-auto space-y-5 custom-scrollbar">
                 
                 {settingsTab === 'speech' ? (
                   <div className="space-y-4">
@@ -2566,7 +2729,7 @@ export default function App() {
                       <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">
                         錄音口音預設 (Preselected Accent/Dialect)
                       </label>
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-2">
                         {LANGUAGES.map((lang) => (
                           <button
                             key={lang.code}
@@ -2856,7 +3019,7 @@ export default function App() {
               className="bg-white w-full max-w-xl rounded-3xl shadow-2xl flex flex-col overflow-hidden max-h-[90vh]"
             >
               {/* Header */}
-              <div className="flex-none p-6 border-b border-zinc-100 flex items-center justify-between bg-zinc-50/50">
+              <div className="flex-none p-4 sm:p-6 border-b border-zinc-100 flex items-center justify-between gap-3 bg-zinc-50/50">
                 <div className="flex items-center gap-2.5">
                   <div className="w-8 h-8 bg-indigo-50 rounded-xl flex items-center justify-center border border-indigo-100">
                     <Brain className="w-4 h-4 text-indigo-600" />
@@ -2875,7 +3038,7 @@ export default function App() {
               </div>
 
               {/* Scrollable Body */}
-              <div className="flex-1 p-6 overflow-y-auto space-y-5 custom-scrollbar bg-white">
+              <div className="flex-1 p-4 sm:p-6 overflow-y-auto space-y-5 custom-scrollbar bg-white">
                 
                 {/* Live AI Recommendation Panel */}
                 {(() => {
