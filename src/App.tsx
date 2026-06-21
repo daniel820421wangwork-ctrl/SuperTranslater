@@ -14,7 +14,34 @@ import {
   joinPresence, leavePresence, subscribeMembers, subscribeConnection,
   setMemberRecording, setMemberMeta, sendCommand, subscribeCommand,
   setRoomConfig, subscribeRoomConfig,
+  pushClip, subscribeClips, deleteClip,
 } from './roomSync';
+
+const IS_MOBILE = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+// Encode 16kHz Float32 audio as base64 Int16 PCM (compact relay over RTDB).
+const float32ToBase64Pcm16 = (f32: Float32Array): string => {
+  const buf = new ArrayBuffer(f32.length * 2);
+  const view = new DataView(buf);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
+  return btoa(bin);
+};
+
+const base64Pcm16ToFloat32 = (b64: string): Float32Array => {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const view = new DataView(bytes.buffer);
+  const out = new Float32Array(bytes.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = view.getInt16(i * 2, true) / 0x8000;
+  return out;
+};
 import { browserTranslate, browserTranslateAvailable } from './browserTranslate';
 import { MicVAD } from '@ricky0123/vad-web';
 
@@ -387,10 +414,13 @@ export default function App() {
   const progressByFileRef = useRef<Record<string, { loaded: number; total: number }>>({});
   const vadRef = useRef<any>(null);
   const whisperJobRef = useRef(0);
+  // Jobs where this device transcribes someone else's relayed clip:
+  // jobId -> the clip's key + originating device, so the result is attributed right.
+  const clipJobsRef = useRef<Map<number, { key: string; deviceId: string; deviceLabel: string; ts: number }>>(new Map());
 
   // ===== Multi-device room sync =====
   const [roomId, setRoomId] = useState<string | null>(null);
-  const [roomMembers, setRoomMembers] = useState<{ id: string; label: string; recording: boolean; hasKey: boolean; provider: string; recMode: string }[]>([]);
+  const [roomMembers, setRoomMembers] = useState<{ id: string; label: string; recording: boolean; hasKey: boolean; provider: string; recMode: string; canWhisper: boolean }[]>([]);
   const [roomConnected, setRoomConnected] = useState(false);
   const [isRoomOpen, setIsRoomOpen] = useState(false);
   const [joinCodeInput, setJoinCodeInput] = useState('');
@@ -816,7 +846,18 @@ export default function App() {
     const offConfig = subscribeRoomConfig(id, (cfg) => {
       setRoomTranslateMode(cfg?.translateMode === 'browser' ? 'browser' : 'ai');
     });
-    roomUnsubsRef.current = [offSeg, offMembers, offConn, offConfig];
+    // Only the elected transcriber turns relayed audio clips into text.
+    const offClips = subscribeClips(id, (key, clip) => {
+      if (activeTranscriberRef.current?.id !== deviceIdRef.current) return;
+      if (!whisperReadyRef.current || !whisperWorkerRef.current) return;
+      try {
+        const audio = base64Pcm16ToFloat32(clip.audio);
+        const jobId = ++whisperJobRef.current;
+        clipJobsRef.current.set(jobId, { key, deviceId: clip.deviceId, deviceLabel: clip.deviceLabel, ts: clip.ts });
+        whisperWorkerRef.current.postMessage({ type: 'transcribe', id: jobId, audio, language: 'english' }, [audio.buffer]);
+      } catch (e) { console.error('clip transcribe failed', e); }
+    });
+    roomUnsubsRef.current = [offSeg, offMembers, offConn, offConfig, offClips];
     joinPresence(id, deviceIdRef.current, deviceLabelRef.current);
 
     try {
@@ -872,7 +913,21 @@ export default function App() {
         addToast(`Whisper 載入失敗：${msg.error || '未知錯誤'}`, 'error');
       } else if (msg.type === 'result') {
         const cleaned = cleanTranscript(msg.text || '');
-        if (cleaned && !isJunkTranscript(cleaned)) commitSegment(cleaned);
+        const job = clipJobsRef.current.get(msg.id);
+        if (job) {
+          // This was someone else's relayed clip: attribute the text to them,
+          // publish it as a room segment, then remove the clip.
+          clipJobsRef.current.delete(msg.id);
+          if (cleaned && !isJunkTranscript(cleaned) && roomIdRef.current) {
+            pushSegment(roomIdRef.current, {
+              original: cleaned, translated: null,
+              deviceId: job.deviceId, deviceLabel: job.deviceLabel, ts: job.ts,
+            });
+          }
+          if (roomIdRef.current) deleteClip(roomIdRef.current, job.key);
+        } else if (cleaned && !isJunkTranscript(cleaned)) {
+          commitSegment(cleaned); // solo local transcription
+        }
       }
     };
     whisperWorkerRef.current = worker;
@@ -897,23 +952,44 @@ export default function App() {
   useEffect(() => {
     if (modelMountRef.current) { modelMountRef.current = false; return; }
     whisperReadyRef.current = false;
-    if (recognitionMode === 'whisper') loadWhisperModel();
+    if (recognitionMode === 'whisper' && (!roomIdRef.current || !IS_MOBILE)) loadWhisperModel();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whisperModel]);
 
   // Send one VAD-detected utterance (16kHz Float32) to Whisper, after a capped
   // peak-normalization so quiet mics are boosted to a consistent level.
-  const transcribeClip = useCallback((audio: Float32Array) => {
-    if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25 || !whisperReadyRef.current) return;
+  // Peak-normalize in place (boost quiet mics; capped to avoid amplifying noise).
+  const normalizeAudio = (audio: Float32Array) => {
     let peak = 0;
     for (let i = 0; i < audio.length; i++) { const a = Math.abs(audio[i]); if (a > peak) peak = a; }
     if (peak > 0.001) {
       const gain = Math.min(8, 0.95 / peak);
       if (gain > 1.05) for (let i = 0; i < audio.length; i++) audio[i] *= gain;
     }
+  };
+
+  // Solo path: transcribe this device's own utterance with local Whisper.
+  const transcribeLocal = useCallback((audio: Float32Array) => {
+    if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25 || !whisperReadyRef.current) return;
+    normalizeAudio(audio);
     const id = ++whisperJobRef.current;
     whisperWorkerRef.current?.postMessage({ type: 'transcribe', id, audio, language: 'english' }, [audio.buffer]);
   }, []);
+
+  // One VAD-detected utterance: in a room, relay it as a clip for the room's
+  // transcriber to handle; solo, transcribe it locally.
+  const handleUtterance = useCallback((audio: Float32Array) => {
+    if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25) return;
+    if (roomIdRef.current && isFirebaseConfigured()) {
+      normalizeAudio(audio);
+      pushClip(roomIdRef.current, {
+        audio: float32ToBase64Pcm16(audio),
+        deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current, ts: Date.now(),
+      });
+    } else {
+      transcribeLocal(audio);
+    }
+  }, [transcribeLocal]);
 
   const stopWhisperRecording = useCallback(() => {
     shouldKeepRecordingRef.current = false;
@@ -927,7 +1003,9 @@ export default function App() {
   }, []);
 
   const startWhisperRecording = useCallback(async () => {
-    if (!whisperReadyRef.current) {
+    // In a room we only CAPTURE + relay clips (the transcriber needs the model,
+    // not us). Solo, we transcribe locally, so the model must be ready first.
+    if (!roomIdRef.current && !whisperReadyRef.current) {
       addToast('Whisper 尚未載入完成，請稍候片刻再開始。', 'info');
       return;
     }
@@ -946,7 +1024,7 @@ export default function App() {
           noiseSuppression: true,
           autoGainControl: true,
         } as any,
-        onSpeechEnd: (audio: Float32Array) => { transcribeClip(audio); },
+        onSpeechEnd: (audio: Float32Array) => { handleUtterance(audio); },
       } as any);
       vadRef.current = vad;
       vad.start();
@@ -959,7 +1037,7 @@ export default function App() {
       addToast('麥克風或語音偵測啟動失敗，請至下方手動輸入欄。', 'error');
       stopWhisperRecording();
     }
-  }, [addToast, transcribeClip, stopWhisperRecording, vadThreshold, whisperPauseMs]);
+  }, [addToast, handleUtterance, stopWhisperRecording, vadThreshold, whisperPauseMs]);
 
   // Initialize Speech Recognition once. The locale is updated live (see below)
   // rather than by re-creating the instance, which avoids leaking recognizers.
@@ -1071,10 +1149,11 @@ export default function App() {
       try { recognitionRef.current?.stop(); } catch {}
       stopWhisperRecording();
     }
-    if (recognitionMode === 'whisper' && !whisperReadyRef.current) {
+    // Phones in a room only capture + relay clips, so they skip the heavy model.
+    if (recognitionMode === 'whisper' && !whisperReadyRef.current && (!roomId || !IS_MOBILE)) {
       loadWhisperModel();
     }
-  }, [recognitionMode, loadWhisperModel, stopWhisperRecording]);
+  }, [recognitionMode, roomId, loadWhisperModel, stopWhisperRecording]);
 
   // Tear down the Whisper worker and audio graph on unmount.
   useEffect(() => () => {
@@ -1139,7 +1218,8 @@ export default function App() {
     const want = pendingStartRef.current;
     if (!want || isActualRecordingRef.current) return;
     if (recognitionModeRef.current !== want) return;           // wait for the mode switch to apply
-    if (want === 'whisper' && !whisperReadyRef.current) return; // wait for the model to load
+    // Solo Whisper needs the model first; in a room we only capture/relay clips.
+    if (want === 'whisper' && !roomIdRef.current && !whisperReadyRef.current) return;
     pendingStartRef.current = null;
     startRecordingRef.current();
   }, []);
@@ -1175,6 +1255,19 @@ export default function App() {
     });
     return () => unsub();
   }, [roomId, addToast, tryStartPending]);
+
+  // Advertise whether this device can serve as the room's Whisper transcriber
+  // (model loaded + not a phone), and elect the lowest-id capable device.
+  const canWhisperHere = whisperState === 'ready' && !IS_MOBILE;
+  useEffect(() => {
+    if (roomId) setMemberMeta(roomId, deviceIdRef.current, { canWhisper: canWhisperHere });
+  }, [roomId, canWhisperHere]);
+  const activeTranscriber = useMemo(() => {
+    const cap = roomMembers.filter(m => m.canWhisper).sort((a, b) => a.id.localeCompare(b.id));
+    return cap[0] || null;
+  }, [roomMembers]);
+  const activeTranscriberRef = useRef(activeTranscriber);
+  useEffect(() => { activeTranscriberRef.current = activeTranscriber; });
 
   // Pick a provider this device can actually translate with: prefer the
   // selected engine if it has a key, otherwise fall back to ANY key the
@@ -1635,7 +1728,9 @@ export default function App() {
 
             {/* Action record toggle button */}
             {(() => {
-              const whisperBusy = recognitionMode === 'whisper' && whisperState !== 'ready';
+              // In a room we capture+relay (no local model needed); only solo
+              // Whisper must wait for the model before recording.
+              const whisperBusy = recognitionMode === 'whisper' && !roomId && whisperState !== 'ready';
               return (
                 <button
                   onClick={toggleRecording}
@@ -2333,8 +2428,17 @@ export default function App() {
                           );
                         })}
                       </div>
+                      {activeTranscriber ? (
+                        <p className="text-[10px] mt-2 leading-relaxed px-2.5 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 font-bold">
+                          🎯 轉錄由 {activeTranscriber.label}{activeTranscriber.id === deviceIdRef.current ? '（本機）' : ''} 負責（高精準模式收音的音訊會送它用 Whisper 轉文字）
+                        </p>
+                      ) : (
+                        <p className="text-[10px] mt-2 leading-relaxed px-2.5 py-1.5 rounded-lg bg-amber-50 text-amber-700 font-bold">
+                          ⚠️ 房間內沒有可轉錄的裝置。請在一台桌機/筆電上把引擎切到「🎯 高精準」並等模型載入,它就會成為轉錄者(手機高精準收音才有文字)。
+                        </p>
+                      )}
                       {activeTranslator ? (
-                        <p className="text-[10px] mt-2 leading-relaxed px-2.5 py-1.5 rounded-lg bg-indigo-50 text-indigo-700 font-bold">
+                        <p className="text-[10px] mt-1.5 leading-relaxed px-2.5 py-1.5 rounded-lg bg-indigo-50 text-indigo-700 font-bold">
                           目前翻譯由 {activeTranslator.label}{activeTranslator.id === deviceIdRef.current ? '（本機）' : ''} 提供
                           （{activeTranslator.provider === 'openai' ? 'OpenAI' : activeTranslator.provider === 'claude' ? 'Claude' : activeTranslator.provider === 'gemini' ? 'Gemini' : '金鑰'}）— 房間內任一台有金鑰即可翻譯
                         </p>

@@ -84,7 +84,7 @@ export const setMemberRecording = (roomId: string, deviceId: string, recording: 
 };
 
 // Report member metadata (translate capability/provider, current recording mode).
-export const setMemberMeta = (roomId: string, deviceId: string, meta: { hasKey?: boolean; provider?: string; recMode?: string }): void => {
+export const setMemberMeta = (roomId: string, deviceId: string, meta: { hasKey?: boolean; provider?: string; recMode?: string; canWhisper?: boolean }): void => {
   const d = getDb();
   if (!d) return;
   update(ref(d, `rooms/${roomId}/members/${deviceId}`), meta).catch(() => {});
@@ -120,7 +120,7 @@ export const leavePresence = (roomId: string, deviceId: string): void => {
 
 export const subscribeMembers = (
   roomId: string,
-  cb: (members: { id: string; label: string; recording: boolean; hasKey: boolean; provider: string; recMode: string }[]) => void,
+  cb: (members: { id: string; label: string; recording: boolean; hasKey: boolean; provider: string; recMode: string; canWhisper: boolean }[]) => void,
 ): (() => void) => {
   const d = getDb();
   if (!d) return () => {};
@@ -133,8 +133,34 @@ export const subscribeMembers = (
       hasKey: !!val[id]?.hasKey,
       provider: val[id]?.provider || '',
       recMode: val[id]?.recMode || 'live',
+      canWhisper: !!val[id]?.canWhisper,
     })));
   });
+};
+
+// ----- Audio clip relay (capturer uploads short clips; transcriber consumes) -----
+export type RoomClip = { audio: string; deviceId: string; deviceLabel: string; ts: number };
+
+export const pushClip = (roomId: string, clip: RoomClip): void => {
+  const d = getDb();
+  if (!d) return;
+  const r = push(ref(d, `rooms/${roomId}/clips`));
+  set(r, clip).catch((e) => console.error('pushClip failed', e));
+};
+
+export const subscribeClips = (
+  roomId: string,
+  onAdd: (key: string, clip: RoomClip) => void,
+): (() => void) => {
+  const d = getDb();
+  if (!d) return () => {};
+  return onChildAdded(ref(d, `rooms/${roomId}/clips`), (snap) => onAdd(snap.key as string, snap.val() as RoomClip));
+};
+
+export const deleteClip = (roomId: string, key: string): void => {
+  const d = getDb();
+  if (!d) return;
+  remove(ref(d, `rooms/${roomId}/clips/${key}`)).catch(() => {});
 };
 
 // Room-level config (e.g. translation method), set by the room creator.
