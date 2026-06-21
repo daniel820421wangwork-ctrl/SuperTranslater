@@ -49,6 +49,7 @@ import {
 import { MicVAD } from '@ricky0123/vad-web';
 
 type TranslateMode = 'ai' | 'browser';
+type RecognitionMode = 'dual' | 'live' | 'whisper';
 type VisibleBlocks = {
   voiceControls: boolean;
   sessionMemory: boolean;
@@ -339,6 +340,11 @@ export default function App() {
   // sentence at a cut-off isn't dropped.
   const lastInterimRef = useRef('');
   const [interimTranscript, setInterimTranscript] = useState('');
+  const [liveDraftTranscript, setLiveDraftTranscript] = useState('');
+  const liveDraftTranscriptRef = useRef('');
+  const liveRecognitionActiveRef = useRef(false);
+  const whisperRecordingActiveRef = useRef(false);
+  const pendingDualWhisperStartRef = useRef(false);
   const [selectedLang, setSelectedLang] = useState('en-US');
 
   // Multi-Provider AI Settings
@@ -414,9 +420,14 @@ export default function App() {
     () => localStorage.getItem('swift_auto_switch_accent') !== 'false'
   );
 
-  // Recognition engine: 'live' = browser Web Speech (instant), 'whisper' = in-browser Whisper (accurate).
-  const [recognitionMode, setRecognitionMode] = useState<'live' | 'whisper'>(
-    () => (localStorage.getItem('swift_recognition_mode') === 'whisper' ? 'whisper' : 'live')
+  // Recognition engine: dual shows a fast Web Speech draft on the left while
+  // only Whisper's corrected transcript is committed/translated on the right.
+  const [recognitionMode, setRecognitionMode] = useState<RecognitionMode>(
+    () => {
+      if (localStorage.getItem('swift_dual_mode_initialized') !== 'true') return 'dual';
+      const saved = localStorage.getItem('swift_recognition_mode');
+      return saved === 'whisper' ? 'whisper' : saved === 'live' ? 'live' : 'dual';
+    }
   );
   const [whisperState, setWhisperState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [whisperProgress, setWhisperProgress] = useState(0);
@@ -789,6 +800,7 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem('swift_recognition_mode', recognitionMode);
+    localStorage.setItem('swift_dual_mode_initialized', 'true');
   }, [recognitionMode]);
 
   useEffect(() => {
@@ -1000,7 +1012,7 @@ export default function App() {
   useEffect(() => {
     if (modelMountRef.current) { modelMountRef.current = false; return; }
     whisperReadyRef.current = false;
-    if (recognitionMode === 'whisper' && (!roomIdRef.current || !IS_MOBILE)) loadWhisperModel();
+    if ((recognitionMode === 'whisper' || recognitionMode === 'dual') && (!roomIdRef.current || !IS_MOBILE)) loadWhisperModel();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whisperModel]);
 
@@ -1043,15 +1055,15 @@ export default function App() {
   }, [transcribeLocal]);
 
   const stopWhisperRecording = useCallback(() => {
-    shouldKeepRecordingRef.current = false;
-    isActualRecordingRef.current = false;
-    setIsRecording(false);
-    setInterimTranscript('');
+    whisperRecordingActiveRef.current = false;
     setWhisperActivity('idle');
     if (vadRef.current) {
       try { vadRef.current.destroy(); } catch {}
       vadRef.current = null;
     }
+    const stillRecording = liveRecognitionActiveRef.current;
+    isActualRecordingRef.current = stillRecording;
+    setIsRecording(stillRecording);
   }, []);
 
   const describeMicrophoneError = (error: unknown): { code: string; message: string } => {
@@ -1113,7 +1125,7 @@ export default function App() {
       } as any);
       vadRef.current = vad;
       await vad.start();
-      shouldKeepRecordingRef.current = true;
+      whisperRecordingActiveRef.current = true;
       isActualRecordingRef.current = true;
       setIsRecording(true);
       setWhisperActivity('listening');
@@ -1138,6 +1150,7 @@ export default function App() {
       recognition.lang = selectedLang;
 
       recognition.onstart = () => {
+        liveRecognitionActiveRef.current = true;
         isActualRecordingRef.current = true;
         setIsRecording(true);
         setSpeechErrorDetected(null);
@@ -1156,7 +1169,13 @@ export default function App() {
         }
 
         if (finalText) {
-          commitSegment(finalText);
+          if (recognitionModeRef.current === 'dual') {
+            const next = `${liveDraftTranscriptRef.current} ${finalText}`.trim();
+            liveDraftTranscriptRef.current = next;
+            setLiveDraftTranscript(next);
+          } else {
+            commitSegment(finalText);
+          }
         }
         // Remember the still-unfinalized tail so it survives an auto-restart.
         lastInterimRef.current = interimText;
@@ -1183,17 +1202,25 @@ export default function App() {
         if (event.error !== 'no-speech') {
           shouldKeepRecordingRef.current = false;
         }
-        setIsRecording(false);
-        isActualRecordingRef.current = false;
+        liveRecognitionActiveRef.current = false;
+        const stillRecording = whisperRecordingActiveRef.current;
+        setIsRecording(stillRecording);
+        isActualRecordingRef.current = stillRecording;
       };
 
       recognition.onend = () => {
-        isActualRecordingRef.current = false;
+        liveRecognitionActiveRef.current = false;
         setInterimTranscript('');
         // If the session ended mid-sentence, the un-finalized tail would be lost
         // — commit it so we don't drop those words.
         if (lastInterimRef.current.trim()) {
-          commitSegment(lastInterimRef.current);
+          if (recognitionModeRef.current === 'dual') {
+            const next = `${liveDraftTranscriptRef.current} ${lastInterimRef.current}`.trim();
+            liveDraftTranscriptRef.current = next;
+            setLiveDraftTranscript(next);
+          } else {
+            commitSegment(lastInterimRef.current);
+          }
           lastInterimRef.current = '';
         }
         // The API often ends on its own after a pause or ~60s. If the user still
@@ -1212,7 +1239,9 @@ export default function App() {
             return;
           }
         }
-        setIsRecording(false);
+        const stillRecording = whisperRecordingActiveRef.current;
+        isActualRecordingRef.current = stillRecording;
+        setIsRecording(stillRecording);
       };
 
       recognitionRef.current = recognition;
@@ -1225,7 +1254,7 @@ export default function App() {
     const rec = recognitionRef.current;
     if (!rec) return;
     rec.lang = selectedLang;
-    if (isActualRecordingRef.current) {
+    if (liveRecognitionActiveRef.current) {
       try { rec.stop(); } catch (e) { console.warn('lang switch restart failed', e); }
     }
   }, [selectedLang]);
@@ -1238,7 +1267,7 @@ export default function App() {
       stopWhisperRecording();
     }
     // Phones in a room only capture + relay clips, so they skip the heavy model.
-    if (recognitionMode === 'whisper' && !whisperReadyRef.current && (!roomId || !IS_MOBILE)) {
+    if ((recognitionMode === 'whisper' || recognitionMode === 'dual') && !whisperReadyRef.current && (!roomId || !IS_MOBILE)) {
       loadWhisperModel();
     }
   }, [recognitionMode, roomId, loadWhisperModel, stopWhisperRecording]);
@@ -1250,64 +1279,111 @@ export default function App() {
     whisperWorkerRef.current = null;
   }, [stopWhisperRecording]);
 
-  const startRecording = useCallback(() => {
-    if (isActualRecordingRef.current) return;
-    if (recognitionMode === 'whisper') { startWhisperRecording(); return; }
+  const startLiveRecognition = useCallback(() => {
+    if (liveRecognitionActiveRef.current) return true;
     if (!recognitionRef.current) {
       addToast('您的瀏覽器不支援語音辨識功能。推薦使用下方的「手動鍵盤輸入」！');
-      return;
+      return false;
     }
     try {
       setError(null);
       setSpeechErrorDetected(null);
       shouldKeepRecordingRef.current = true; // keep recording across auto-ends
       recognitionRef.current.start();
+      return true;
     } catch (err) {
       if (err instanceof Error && err.message.includes('already started')) {
+        liveRecognitionActiveRef.current = true;
         setIsRecording(true);
         isActualRecordingRef.current = true;
-        return;
+        return true;
       }
       console.error('Start recognition error:', err);
-      shouldKeepRecordingRef.current = false;
       setSpeechErrorDetected('start-failed');
-      setIsRecording(false);
-      isActualRecordingRef.current = false;
-      addToast('麥克風啟動失敗，請至下方手動輸入欄進行法醫比對與翻譯。');
+      addToast(recognitionModeRef.current === 'dual'
+        ? '即時草稿啟動失敗；Whisper 正式轉錄仍會繼續。'
+        : '麥克風啟動失敗，請至下方手動輸入欄進行法醫比對與翻譯。');
+      return false;
     }
-  }, [recognitionMode, startWhisperRecording, addToast]);
+  }, [addToast]);
+
+  const startRecording = useCallback(() => {
+    if (liveRecognitionActiveRef.current || whisperRecordingActiveRef.current) return;
+    setLiveDraftTranscript('');
+    liveDraftTranscriptRef.current = '';
+    lastInterimRef.current = '';
+    setInterimTranscript('');
+
+    if (recognitionMode === 'whisper') {
+      void startWhisperRecording();
+      return;
+    }
+    if (recognitionMode === 'live') {
+      startLiveRecognition();
+      return;
+    }
+
+    // Dual track: Web Speech is only a low-latency draft. Whisper/VAD is the
+    // authoritative source that commits text to history and translation.
+    startLiveRecognition();
+    if (!roomIdRef.current && !whisperReadyRef.current) {
+      pendingDualWhisperStartRef.current = true;
+      addToast('即時草稿已開始；Whisper 模型就緒後會自動加入正式轉錄。', 'info');
+    } else {
+      void startWhisperRecording();
+    }
+  }, [addToast, recognitionMode, startLiveRecognition, startWhisperRecording]);
+
+  useEffect(() => {
+    if (
+      recognitionMode === 'dual'
+      && whisperState === 'ready'
+      && pendingDualWhisperStartRef.current
+      && liveRecognitionActiveRef.current
+      && !whisperRecordingActiveRef.current
+    ) {
+      pendingDualWhisperStartRef.current = false;
+      void startWhisperRecording();
+    }
+  }, [recognitionMode, startWhisperRecording, whisperState]);
 
   const stopRecording = useCallback(() => {
-    if (recognitionMode === 'whisper') { stopWhisperRecording(); return; }
-    if (isActualRecordingRef.current && recognitionRef.current) {
+    shouldKeepRecordingRef.current = false;
+    pendingDualWhisperStartRef.current = false;
+    if (liveRecognitionActiveRef.current && recognitionRef.current) {
       try {
-        shouldKeepRecordingRef.current = false; // user-initiated stop: don't auto-restart
         recognitionRef.current.stop();
       } catch (err) {
         console.error('Stop recognition error:', err);
       }
     }
-  }, [recognitionMode, stopWhisperRecording]);
+    if (whisperRecordingActiveRef.current || vadRef.current) stopWhisperRecording();
+    liveRecognitionActiveRef.current = false;
+    whisperRecordingActiveRef.current = false;
+    isActualRecordingRef.current = false;
+    setIsRecording(false);
+    setInterimTranscript('');
+  }, [stopWhisperRecording]);
 
   const toggleRecording = () => {
-    if (isActualRecordingRef.current) stopRecording(); else startRecording();
+    if (liveRecognitionActiveRef.current || whisperRecordingActiveRef.current) stopRecording(); else startRecording();
   };
 
   // Keep live refs so the room command listener always calls the current fns.
   const startRecordingRef = useRef(startRecording);
   const stopRecordingRef = useRef(stopRecording);
   useEffect(() => { startRecordingRef.current = startRecording; stopRecordingRef.current = stopRecording; });
-  const recognitionModeRef = useRef(recognitionMode);
+  const recognitionModeRef = useRef<RecognitionMode>(recognitionMode);
   useEffect(() => { recognitionModeRef.current = recognitionMode; });
 
   // A remote "start" may request a mode; we begin once that engine is ready.
-  const pendingStartRef = useRef<'live' | 'whisper' | null>(null);
+  const pendingStartRef = useRef<RecognitionMode | null>(null);
   const tryStartPending = useCallback(() => {
     const want = pendingStartRef.current;
     if (!want || isActualRecordingRef.current) return;
     if (recognitionModeRef.current !== want) return;           // wait for the mode switch to apply
     // Solo Whisper needs the model first; in a room we only capture/relay clips.
-    if (want === 'whisper' && !roomIdRef.current && !whisperReadyRef.current) return;
+    if ((want === 'whisper' || want === 'dual') && !roomIdRef.current && !whisperReadyRef.current) return;
     pendingStartRef.current = null;
     startRecordingRef.current();
   }, []);
@@ -1330,11 +1406,17 @@ export default function App() {
       if (cmd.ts <= lastTs) return; // ignore the pre-existing/stale command
       lastTs = cmd.ts;
       if (cmd.action === 'start') {
-        const mode = cmd.mode === 'whisper' ? 'whisper' : cmd.mode === 'live' ? 'live' : recognitionModeRef.current;
+        const mode: RecognitionMode = cmd.mode === 'dual'
+          ? 'dual'
+          : cmd.mode === 'whisper'
+            ? 'whisper'
+            : cmd.mode === 'live'
+              ? 'live'
+              : recognitionModeRef.current;
         pendingStartRef.current = mode;
         if (mode !== recognitionModeRef.current) setRecognitionMode(mode);
         setTimeout(() => tryStartPending(), 0); // covers the already-in-mode case
-        addToast(`${cmd.from} 要求本機開始收音（${mode === 'whisper' ? '高精準' : '即時'}）`, 'info');
+        addToast(`${cmd.from} 要求本機開始收音（${mode === 'dual' ? '雙軌' : mode === 'whisper' ? '高精準' : '即時'}）`, 'info');
       } else if (cmd.action === 'stop') {
         pendingStartRef.current = null;
         stopRecordingRef.current();
@@ -1560,6 +1642,9 @@ export default function App() {
     setSummary('');
     setDetectedAccent(null);
     setError(null);
+    setLiveDraftTranscript('');
+    liveDraftTranscriptRef.current = '';
+    setInterimTranscript('');
     // In a room, clearing wipes the shared transcript for everyone.
     if (roomIdRef.current && isFirebaseConfigured()) {
       clearRoomSegments(roomIdRef.current);
@@ -1812,7 +1897,7 @@ export default function App() {
                 <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
                 <div className="min-w-0">
                   <h2 className="text-xs font-black text-zinc-500 uppercase tracking-widest truncate">完整逐字稿 · 收音中</h2>
-                  {isRecording && recognitionMode === 'whisper' && (
+                  {isRecording && recognitionMode !== 'live' && (
                     <p className="text-[10px] font-bold text-emerald-600 mt-0.5">{whisperActivityLabel}</p>
                   )}
                 </div>
@@ -1828,16 +1913,22 @@ export default function App() {
               )}
             </div>
             <div ref={liveScrollRef} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 space-y-2">
-              {history.length === 0 && !interimTranscript ? (
+              {(recognitionMode === 'dual' ? !liveDraftTranscript && !interimTranscript : history.length === 0 && !interimTranscript) ? (
                 <p className="text-sm text-zinc-300 mt-8 text-center select-none">開始講話，逐字稿會在此連續顯示…</p>
               ) : (
                 <>
-                  {[...history].reverse().map(h => (
-                    <p key={h.id} style={{ fontSize: transFontPx }} className="leading-relaxed text-zinc-700">
-                      {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}</span>}
-                      {h.original}
-                    </p>
-                  ))}
+                  {recognitionMode === 'dual' ? (
+                    liveDraftTranscript && (
+                      <p style={{ fontSize: transFontPx }} className="leading-relaxed text-zinc-700">{liveDraftTranscript}</p>
+                    )
+                  ) : (
+                    [...history].reverse().map(h => (
+                      <p key={h.id} style={{ fontSize: transFontPx }} className="leading-relaxed text-zinc-700">
+                        {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}</span>}
+                        {h.original}
+                      </p>
+                    ))
+                  )}
                   {interimTranscript && (
                     <p style={{ fontSize: transFontPx }} className="leading-relaxed text-indigo-500 italic">{interimTranscript}</p>
                   )}
@@ -1870,7 +1961,7 @@ export default function App() {
                 <span className={cn(
                   "text-[9px] px-2 py-0.5 rounded-full font-bold",
                   isRecording
-                    ? (recognitionMode === 'whisper' ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600")
+                    ? (recognitionMode !== 'live' ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600")
                     : "bg-zinc-100 text-zinc-500"
                 )}>
                   {isRecording ? "正在接收..." : "錄音閒置"}
@@ -1891,12 +1982,22 @@ export default function App() {
             </div>
 
             {/* Recognition engine toggle */}
-            <div className="flex items-center gap-0.5 p-0.5 rounded-xl border border-zinc-200 bg-zinc-100 text-[11px] font-extrabold select-none">
+            <div className="grid grid-cols-3 gap-0.5 p-0.5 rounded-xl border border-zinc-200 bg-zinc-100 text-[10px] sm:text-[11px] font-extrabold select-none">
+              <button
+                type="button"
+                onClick={() => setRecognitionMode('dual')}
+                className={cn(
+                  "px-1.5 py-1.5 rounded-lg flex items-center justify-center gap-1 transition-all",
+                  recognitionMode === 'dual' ? "bg-white text-violet-700 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                )}
+              >
+                ⚡🎯 雙軌
+              </button>
               <button
                 type="button"
                 onClick={() => setRecognitionMode('live')}
                 className={cn(
-                  "flex-1 px-2 py-1.5 rounded-lg flex items-center justify-center gap-1 transition-all",
+                  "px-1.5 py-1.5 rounded-lg flex items-center justify-center gap-1 transition-all",
                   recognitionMode === 'live' ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
                 )}
               >
@@ -1906,7 +2007,7 @@ export default function App() {
                 type="button"
                 onClick={() => setRecognitionMode('whisper')}
                 className={cn(
-                  "flex-1 px-2 py-1.5 rounded-lg flex items-center justify-center gap-1 transition-all",
+                  "px-1.5 py-1.5 rounded-lg flex items-center justify-center gap-1 transition-all",
                   recognitionMode === 'whisper' ? "bg-white text-emerald-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
                 )}
               >
@@ -1914,13 +2015,19 @@ export default function App() {
               </button>
             </div>
 
-            {recognitionMode === 'whisper' && (
+            {recognitionMode === 'dual' && (
+              <p className="text-[10px] text-violet-600 bg-violet-50 border border-violet-100 rounded-xl p-2.5 leading-relaxed">
+                建議模式：左側用 Web Speech 顯示低延遲草稿；右側只採用 Whisper 校正版進行翻譯與正式存檔。
+              </p>
+            )}
+
+            {recognitionMode !== 'live' && (
               <p className="text-[10px] text-zinc-400 leading-relaxed">
                 高精準模式在你的瀏覽器本機執行 Whisper（口音更準、音訊不離開裝置）。首次使用需下載模型（約 145MB），之後瀏覽器會快取。
               </p>
             )}
 
-            {recognitionMode === 'whisper' && whisperState === 'loading' && (
+            {recognitionMode !== 'live' && whisperState === 'loading' && (
               <div className="space-y-1">
                 <div className="flex justify-between text-[10px] font-bold text-zinc-500">
                   <span>模型下載中…首次較久請稍候</span><span>{whisperProgress}%</span>
@@ -1931,7 +2038,7 @@ export default function App() {
               </div>
             )}
 
-            {recognitionMode === 'whisper' && whisperState === 'error' && (
+            {recognitionMode !== 'live' && whisperState === 'error' && (
               <button onClick={loadWhisperModel} className="text-[11px] font-bold text-red-600 underline self-start">
                 模型載入失敗，點此重試
               </button>
@@ -1941,10 +2048,10 @@ export default function App() {
                 (live = indigo, Whisper high-accuracy = emerald). */}
             {isRecording && (
               <div className="flex items-center justify-center gap-1 py-1.5 bg-zinc-50 rounded-xl border border-zinc-100">
-                <span className={cn("w-1.5 h-4 rounded-full animate-bounce [animation-delay:-0.4s]", recognitionMode === 'whisper' ? "bg-emerald-500" : "bg-indigo-500")} />
-                <span className={cn("w-1.5 h-6 rounded-full animate-bounce [animation-delay:-0.2s]", recognitionMode === 'whisper' ? "bg-emerald-600" : "bg-indigo-600")} />
-                <span className={cn("w-1.5 h-8 rounded-full animate-bounce", recognitionMode === 'whisper' ? "bg-emerald-600" : "bg-indigo-600")} />
-                <span className={cn("w-1.5 h-5 rounded-full animate-bounce [animation-delay:-0.3s]", recognitionMode === 'whisper' ? "bg-emerald-500" : "bg-indigo-500")} />
+                <span className={cn("w-1.5 h-4 rounded-full animate-bounce [animation-delay:-0.4s]", recognitionMode !== 'live' ? "bg-emerald-500" : "bg-indigo-500")} />
+                <span className={cn("w-1.5 h-6 rounded-full animate-bounce [animation-delay:-0.2s]", recognitionMode !== 'live' ? "bg-emerald-600" : "bg-indigo-600")} />
+                <span className={cn("w-1.5 h-8 rounded-full animate-bounce", recognitionMode !== 'live' ? "bg-emerald-600" : "bg-indigo-600")} />
+                <span className={cn("w-1.5 h-5 rounded-full animate-bounce [animation-delay:-0.3s]", recognitionMode !== 'live' ? "bg-emerald-500" : "bg-indigo-500")} />
                 <span className="w-1.5 h-3 bg-zinc-300 rounded-full animate-bounce [animation-delay:-0.1s]" />
               </div>
             )}
@@ -1964,7 +2071,7 @@ export default function App() {
                       ? "bg-zinc-200 text-zinc-400 border-zinc-200 cursor-not-allowed"
                       : isRecording
                         ? "bg-red-500 hover:bg-red-600 text-white border-red-600 shadow-md shadow-red-100"
-                        : recognitionMode === 'whisper'
+                        : recognitionMode !== 'live'
                           ? "bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-700 shadow-lg shadow-emerald-100"
                           : "bg-indigo-600 hover:bg-indigo-700 text-white border-indigo-700 shadow-lg shadow-indigo-100"
                   )}
@@ -1982,7 +2089,7 @@ export default function App() {
                   ) : (
                     <>
                       <Mic className="w-5 h-5" />
-                      <span>{recognitionMode === 'whisper' ? '開啟麥克風（高精準）' : '開啟麥克風 開始錄音'}</span>
+                      <span>{recognitionMode === 'dual' ? '開始雙軌辨識' : recognitionMode === 'whisper' ? '開啟麥克風（高精準）' : '開啟麥克風 開始錄音'}</span>
                     </>
                   )}
                 </button>
@@ -1991,7 +2098,7 @@ export default function App() {
 
             {/* Real-time Listening Transcript Section — only the live (Web Speech)
                 engine streams interim words; Whisper transcribes per utterance. */}
-            {recognitionMode === 'live' && (isRecording || interimTranscript) && (
+            {(recognitionMode === 'live' || recognitionMode === 'dual') && (isRecording || interimTranscript || liveDraftTranscript) && (
               <div className="mt-3 p-3.5 bg-zinc-50 border border-zinc-200/60 rounded-2xl space-y-2 animate-fade-in">
                 <div className="flex items-center gap-2">
                   <span className="flex h-2 w-2 relative">
@@ -1999,12 +2106,14 @@ export default function App() {
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
                   </span>
                   <span className="text-[10px] font-black uppercase text-zinc-400 tracking-wider font-mono flex items-center gap-1">
-                    即時收錄中 (Live listening...)
+                    {recognitionMode === 'dual' ? '左側即時草稿（不送翻譯）' : '即時收錄中 (Live listening...)'}
                   </span>
                 </div>
                 <div className="text-xs text-zinc-800 leading-relaxed font-sans italic break-words min-h-[24px]">
-                  {interimTranscript ? (
-                    <span className="text-zinc-900 font-semibold not-italic">{interimTranscript}</span>
+                  {liveDraftTranscript || interimTranscript ? (
+                    <span className="text-zinc-900 font-semibold not-italic">
+                      {liveDraftTranscript}{liveDraftTranscript && interimTranscript ? ' ' : ''}{interimTranscript}
+                    </span>
                   ) : (
                     <span className="text-zinc-400 animate-pulse">請開始講話，即時轉錄文字會顯示在此處...</span>
                   )}
@@ -2013,7 +2122,7 @@ export default function App() {
             )}
 
             {/* Whisper has no streaming interim — show a listening hint instead. */}
-            {recognitionMode === 'whisper' && isRecording && (
+            {recognitionMode !== 'live' && isRecording && (
               <div className="mt-3 p-3 bg-indigo-50/50 border border-indigo-100 rounded-2xl flex items-center gap-2.5 animate-fade-in">
                 <span className="flex h-2 w-2 relative shrink-0">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
@@ -2101,7 +2210,7 @@ export default function App() {
 
             {/* Live Recommendation Matcher */}
             {(() => {
-              const fullSpeechText = history.map(h => h.original).join(' ') + ' ' + interimTranscript;
+              const fullSpeechText = history.map(h => h.original).join(' ') + ' ' + liveDraftTranscript + ' ' + interimTranscript;
               const { recommendedId, matchedWords } = analyzeSessionMemory(fullSpeechText);
               const currentPreset = CONTEXT_PRESETS.find(p => p.text === sessionContext);
               const recPreset = CONTEXT_PRESETS.find(p => p.id === recommendedId);
@@ -2187,10 +2296,12 @@ export default function App() {
             <div>
               <h2 className="text-sm font-bold text-zinc-805 flex items-center gap-1.5">
                 <ListChecks className="w-4 h-4 text-indigo-600" />
-                課堂與會議歷史逐字稿
+                {recognitionMode === 'dual' ? 'Whisper 校正版與翻譯' : '課堂與會議歷史逐字稿'}
               </h2>
               <p className="text-[10px] text-zinc-400 mt-0.5">
-                點擊上方錄音，已翻譯完成的每個完整段落將在下方獨立存檔
+                {recognitionMode === 'dual'
+                  ? '右側只接收 Whisper 高精準結果；左側即時草稿不會送入翻譯或正式存檔'
+                  : '點擊上方錄音，已翻譯完成的每個完整段落將在下方獨立存檔'}
               </p>
             </div>
             
@@ -2673,7 +2784,9 @@ export default function App() {
                                 <span className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", m.recording ? "bg-red-500 animate-pulse" : "bg-zinc-300")} />
                                 <span className="truncate">{m.label}{isSelf ? '（本機）' : ''}</span>
                                 <span className="text-[10px] font-normal text-zinc-400">{m.recording ? '收音中' : '閒置'}</span>
-                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-500 whitespace-nowrap">{m.recMode === 'whisper' ? '🎯 高精準' : '⚡ 即時'}</span>
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-500 whitespace-nowrap">
+                                  {m.recMode === 'dual' ? '⚡🎯 雙軌' : m.recMode === 'whisper' ? '🎯 高精準' : '⚡ 即時'}
+                                </span>
                                 {m.hasKey && (
                                   <span className={cn(
                                     "text-[9px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap",
@@ -2694,6 +2807,13 @@ export default function App() {
                                   </button>
                                 ) : (
                                   <div className="flex gap-1 shrink-0">
+                                    <button
+                                      onClick={() => sendCommand(roomId, m.id, 'start', deviceLabelRef.current, 'dual')}
+                                      title="遙控此裝置用雙軌模式收音"
+                                      className="text-[10px] font-bold px-1.5 py-1 rounded-md border text-violet-700 bg-violet-50 border-violet-100 hover:bg-violet-100 transition-colors"
+                                    >
+                                      ⚡🎯
+                                    </button>
                                     <button
                                       onClick={() => sendCommand(roomId, m.id, 'start', deviceLabelRef.current, 'live')}
                                       title="遙控此裝置用即時模式收音"
@@ -3172,7 +3292,7 @@ export default function App() {
                 
                 {/* Live AI Recommendation Panel */}
                 {(() => {
-                  const fullSpeechText = history.map(h => h.original).join(' ') + ' ' + interimTranscript;
+                  const fullSpeechText = history.map(h => h.original).join(' ') + ' ' + liveDraftTranscript + ' ' + interimTranscript;
                   const { recommendedId, matchedWords } = analyzeSessionMemory(fullSpeechText);
                   const recPreset = CONTEXT_PRESETS.find(p => p.id === recommendedId);
                   const currentPreset = CONTEXT_PRESETS.find(p => p.text === sessionContext);

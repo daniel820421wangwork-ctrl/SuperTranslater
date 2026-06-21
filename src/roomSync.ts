@@ -92,7 +92,7 @@ export const setMemberMeta = (roomId: string, deviceId: string, meta: { hasKey?:
 
 // Send a start/stop command to another device. For 'start', an optional
 // recognition mode ('live' | 'whisper') tells the target how to record.
-export const sendCommand = (roomId: string, targetDeviceId: string, action: 'start' | 'stop', from: string, mode?: 'live' | 'whisper'): void => {
+export const sendCommand = (roomId: string, targetDeviceId: string, action: 'start' | 'stop', from: string, mode?: 'dual' | 'live' | 'whisper'): void => {
   const d = getDb();
   if (!d) return;
   set(ref(d, `rooms/${roomId}/commands/${targetDeviceId}`), { action, ts: Date.now(), from, mode: mode || null }).catch(() => {});
@@ -102,7 +102,7 @@ export const sendCommand = (roomId: string, targetDeviceId: string, action: 'sta
 export const subscribeCommand = (
   roomId: string,
   deviceId: string,
-  cb: (cmd: { action: 'start' | 'stop'; ts: number; from: string; mode?: 'live' | 'whisper' | null }) => void,
+  cb: (cmd: { action: 'start' | 'stop'; ts: number; from: string; mode?: 'dual' | 'live' | 'whisper' | null }) => void,
 ): (() => void) => {
   const d = getDb();
   if (!d) return () => {};
