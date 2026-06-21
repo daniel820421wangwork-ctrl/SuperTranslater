@@ -16,6 +16,7 @@ import {
   setRoomConfig, subscribeRoomConfig,
 } from './roomSync';
 import { browserTranslate, browserTranslateAvailable } from './browserTranslate';
+import { MicVAD } from '@ricky0123/vad-web';
 
 type TranslateMode = 'ai' | 'browser';
 
@@ -369,31 +370,22 @@ export default function App() {
   const [whisperState, setWhisperState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [whisperProgress, setWhisperProgress] = useState(0);
 
-  // User-adjustable Whisper capture parameters (persisted).
+  // User-adjustable Silero VAD + Whisper parameters (persisted).
   const numFromLS = (k: string, d: number) => { const n = Number(localStorage.getItem(k)); return Number.isFinite(n) && n > 0 ? n : d; };
-  const [whisperSilenceThresh, setWhisperSilenceThresh] = useState<number>(() => numFromLS('swift_whisper_thresh', 0.012));
+  // Speech-detection threshold (0–1; lower = more sensitive).
+  const [vadThreshold, setVadThreshold] = useState<number>(() => numFromLS('swift_vad_threshold', 0.5));
+  // How long a pause ends an utterance (ms).
   const [whisperPauseMs, setWhisperPauseMs] = useState<number>(() => numFromLS('swift_whisper_pause', 700));
-  const [whisperMaxSec, setWhisperMaxSec] = useState<number>(() => numFromLS('swift_whisper_maxsec', 18));
   const [whisperModel, setWhisperModel] = useState<string>(() => localStorage.getItem('swift_whisper_model') || WHISPER_MODEL);
-  // Live refs so the audio callback always reads the current values.
-  const whisperThreshRef = useRef(whisperSilenceThresh);
-  const whisperPauseRef = useRef(whisperPauseMs);
-  const whisperMaxSecRef = useRef(whisperMaxSec);
   const whisperModelRef = useRef(whisperModel);
-  useEffect(() => { whisperThreshRef.current = whisperSilenceThresh; localStorage.setItem('swift_whisper_thresh', String(whisperSilenceThresh)); }, [whisperSilenceThresh]);
-  useEffect(() => { whisperPauseRef.current = whisperPauseMs; localStorage.setItem('swift_whisper_pause', String(whisperPauseMs)); }, [whisperPauseMs]);
-  useEffect(() => { whisperMaxSecRef.current = whisperMaxSec; localStorage.setItem('swift_whisper_maxsec', String(whisperMaxSec)); }, [whisperMaxSec]);
+  useEffect(() => { localStorage.setItem('swift_vad_threshold', String(vadThreshold)); }, [vadThreshold]);
+  useEffect(() => { localStorage.setItem('swift_whisper_pause', String(whisperPauseMs)); }, [whisperPauseMs]);
   useEffect(() => { whisperModelRef.current = whisperModel; localStorage.setItem('swift_whisper_model', whisperModel); }, [whisperModel]);
 
   const whisperWorkerRef = useRef<Worker | null>(null);
   const whisperReadyRef = useRef(false);
   const progressByFileRef = useRef<Record<string, { loaded: number; total: number }>>({});
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const audioNodesRef = useRef<{ source: MediaStreamAudioSourceNode; processor: ScriptProcessorNode } | null>(null);
-  const whisperBufRef = useRef<Float32Array[]>([]);
-  const whisperHasSpeechRef = useRef(false);
-  const whisperLastVoiceRef = useRef(0);
+  const vadRef = useRef<any>(null);
   const whisperJobRef = useRef(0);
 
   // ===== Multi-device room sync =====
@@ -909,17 +901,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whisperModel]);
 
-  // Cut the current utterance buffer and send it to Whisper.
-  const flushWhisperUtterance = useCallback(() => {
-    const chunks = whisperBufRef.current;
-    whisperBufRef.current = [];
-    whisperHasSpeechRef.current = false;
-    if (!chunks.length || !audioCtxRef.current || !whisperReadyRef.current) return;
-    const merged = concatFloat32(chunks);
-    const audio = resampleTo16k(merged, audioCtxRef.current.sampleRate);
-    if (audio.length < WHISPER_SAMPLE_RATE * 0.3) return; // ignore <0.3s blips
-    // Normalize amplitude so quiet mics get boosted to a consistent level
-    // (capped to avoid over-amplifying background noise).
+  // Send one VAD-detected utterance (16kHz Float32) to Whisper, after a capped
+  // peak-normalization so quiet mics are boosted to a consistent level.
+  const transcribeClip = useCallback((audio: Float32Array) => {
+    if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25 || !whisperReadyRef.current) return;
     let peak = 0;
     for (let i = 0; i < audio.length; i++) { const a = Math.abs(audio[i]); if (a > peak) peak = a; }
     if (peak > 0.001) {
@@ -935,76 +920,46 @@ export default function App() {
     isActualRecordingRef.current = false;
     setIsRecording(false);
     setInterimTranscript('');
-    if (audioNodesRef.current) {
-      try { audioNodesRef.current.processor.disconnect(); } catch {}
-      try { audioNodesRef.current.source.disconnect(); } catch {}
-      audioNodesRef.current = null;
+    if (vadRef.current) {
+      try { vadRef.current.destroy(); } catch {}
+      vadRef.current = null;
     }
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(t => t.stop());
-      mediaStreamRef.current = null;
-    }
-    // flush any trailing speech before tearing down
-    flushWhisperUtterance();
-    if (audioCtxRef.current) {
-      try { audioCtxRef.current.close(); } catch {}
-      audioCtxRef.current = null;
-    }
-  }, [flushWhisperUtterance]);
+  }, []);
 
   const startWhisperRecording = useCallback(async () => {
     if (!whisperReadyRef.current) {
       addToast('Whisper 尚未載入完成，請稍候片刻再開始。', 'info');
       return;
     }
+    if (vadRef.current) return; // already running
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
+      // Silero VAD detects real speech and hands us each utterance at 16kHz.
+      // redemptionFrames ≈ pause length (each frame ~32ms at 16kHz).
+      const vad = await MicVAD.new({
+        positiveSpeechThreshold: vadThreshold,
+        negativeSpeechThreshold: Math.max(0.1, vadThreshold - 0.15),
+        redemptionFrames: Math.max(2, Math.round(whisperPauseMs / 32)),
+        minSpeechFrames: 3,
+        preSpeechPadFrames: 6,
+        additionalAudioConstraints: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          channelCount: 1,
-        } as MediaTrackConstraints,
-      });
-      mediaStreamRef.current = stream;
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      audioCtxRef.current = ctx;
-      const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
-      audioNodesRef.current = { source, processor };
-
-      whisperBufRef.current = [];
-      whisperHasSpeechRef.current = false;
-      whisperLastVoiceRef.current = performance.now();
-
-      processor.onaudioprocess = (ev: AudioProcessingEvent) => {
-        const input = ev.inputBuffer.getChannelData(0);
-        whisperBufRef.current.push(new Float32Array(input));
-        const now = performance.now();
-        const loud = frameRms(input) > whisperThreshRef.current;
-        if (loud) { whisperHasSpeechRef.current = true; whisperLastVoiceRef.current = now; }
-
-        const bufferedSamples = whisperBufRef.current.reduce((n, c) => n + c.length, 0);
-        const bufferedSec = bufferedSamples / ctx.sampleRate;
-        const silentFor = now - whisperLastVoiceRef.current;
-        // Cut on a natural pause (after real speech), or force-cut a long run.
-        if ((whisperHasSpeechRef.current && silentFor > whisperPauseRef.current && bufferedSec > 0.6) || bufferedSec > whisperMaxSecRef.current) {
-          flushWhisperUtterance();
-        }
-      };
-
-      source.connect(processor);
-      processor.connect(ctx.destination);
+        } as any,
+        onSpeechEnd: (audio: Float32Array) => { transcribeClip(audio); },
+      } as any);
+      vadRef.current = vad;
+      vad.start();
       shouldKeepRecordingRef.current = true;
       isActualRecordingRef.current = true;
       setIsRecording(true);
       setSpeechErrorDetected(null);
     } catch (err) {
-      console.error('Whisper mic error', err);
-      addToast('麥克風啟動失敗，請至下方手動輸入欄。', 'error');
+      console.error('VAD/mic error', err);
+      addToast('麥克風或語音偵測啟動失敗，請至下方手動輸入欄。', 'error');
       stopWhisperRecording();
     }
-  }, [addToast, flushWhisperUtterance, stopWhisperRecording]);
+  }, [addToast, transcribeClip, stopWhisperRecording, vadThreshold, whisperPauseMs]);
 
   // Initialize Speech Recognition once. The locale is updated live (see below)
   // rather than by re-creating the instance, which avoids leaking recognizers.
@@ -2560,12 +2515,13 @@ export default function App() {
                     <div className="p-3.5 rounded-2xl border border-zinc-200 bg-zinc-50/60 space-y-3">
                       <p className="text-xs font-bold text-zinc-700">🎯 高精準（Whisper）收音參數</p>
 
+                      <p className="text-[10px] text-zinc-400 -mt-1">由 Silero VAD 偵測語音切句。調整需重新開始收音才套用。</p>
                       <div>
                         <div className="flex justify-between text-[11px] font-bold text-zinc-500">
-                          <span>收音靈敏度（越小越靈敏）</span><span>{whisperSilenceThresh.toFixed(3)}</span>
+                          <span>語音偵測門檻（越低越靈敏）</span><span>{vadThreshold.toFixed(2)}</span>
                         </div>
-                        <input type="range" min={0.004} max={0.04} step={0.002} value={whisperSilenceThresh}
-                          onChange={(e) => setWhisperSilenceThresh(Number(e.target.value))}
+                        <input type="range" min={0.2} max={0.8} step={0.05} value={vadThreshold}
+                          onChange={(e) => setVadThreshold(Number(e.target.value))}
                           className="w-full accent-indigo-600" />
                       </div>
 
@@ -2575,15 +2531,6 @@ export default function App() {
                         </div>
                         <input type="range" min={300} max={2000} step={50} value={whisperPauseMs}
                           onChange={(e) => setWhisperPauseMs(Number(e.target.value))}
-                          className="w-full accent-indigo-600" />
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-[11px] font-bold text-zinc-500">
-                          <span>單句最長（強制斷句）</span><span>{whisperMaxSec} 秒</span>
-                        </div>
-                        <input type="range" min={6} max={30} step={1} value={whisperMaxSec}
-                          onChange={(e) => setWhisperMaxSec(Number(e.target.value))}
                           className="w-full accent-indigo-600" />
                       </div>
 
@@ -2600,7 +2547,7 @@ export default function App() {
 
                       <button
                         type="button"
-                        onClick={() => { setWhisperSilenceThresh(0.012); setWhisperPauseMs(700); setWhisperMaxSec(18); }}
+                        onClick={() => { setVadThreshold(0.5); setWhisperPauseMs(700); }}
                         className="text-[11px] font-bold text-indigo-600 underline"
                       >
                         回復預設值
