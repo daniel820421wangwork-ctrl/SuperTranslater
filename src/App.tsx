@@ -18,6 +18,13 @@ import {
 } from './roomSync';
 
 const IS_MOBILE = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+// iOS (iPhone / iPad) — blocks local Whisper; Mac Safari is NOT included here.
+const IS_IOS = typeof navigator !== 'undefined' && (
+  /iPhone|iPod/i.test(navigator.userAgent) ||
+  (/iPad/i.test(navigator.userAgent)) ||
+  // iPad on iOS 13+ reports itself as MacIntel but has touch
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+);
 
 // Encode 16kHz Float32 audio as base64 Int16 PCM (compact relay over RTDB).
 const float32ToBase64Pcm16 = (f32: Float32Array): string => {
@@ -999,12 +1006,12 @@ export default function App() {
     worker.postMessage({ type: 'load', model, device });
   }, [ensureWhisperWorker]);
 
-  // Reload Whisper when the user picks a different model (while in whisper mode).
+  // When user changes the model, reset ready state so the next manual download picks up the new model.
   const modelMountRef = useRef(true);
   useEffect(() => {
     if (modelMountRef.current) { modelMountRef.current = false; return; }
     whisperReadyRef.current = false;
-    if ((recognitionMode === 'whisper' || recognitionMode === 'dual') && (!roomIdRef.current || !IS_MOBILE)) loadWhisperModel();
+    setWhisperState('idle');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whisperModel]);
 
@@ -1251,18 +1258,15 @@ export default function App() {
     }
   }, [selectedLang]);
 
-  // Switching engine: stop whatever is recording, and lazily load Whisper.
+  // Switching engine: stop whatever is recording. Whisper is NOT auto-loaded —
+  // the user must click the download button manually.
   useEffect(() => {
     if (isActualRecordingRef.current) {
       shouldKeepRecordingRef.current = false;
       try { recognitionRef.current?.stop(); } catch {}
       stopWhisperRecording();
     }
-    // Phones in a room only capture + relay clips, so they skip the heavy model.
-    if ((recognitionMode === 'whisper' || recognitionMode === 'dual') && !whisperReadyRef.current && (!roomId || !IS_MOBILE)) {
-      loadWhisperModel();
-    }
-  }, [recognitionMode, roomId, loadWhisperModel, stopWhisperRecording]);
+  }, [recognitionMode, stopWhisperRecording]);
 
   // Tear down the Whisper worker and audio graph on unmount.
   useEffect(() => () => {
@@ -1420,7 +1424,7 @@ export default function App() {
 
   // Advertise whether this device can serve as the room's Whisper transcriber
   // (model loaded + not a phone), and elect the lowest-id capable device.
-  const canWhisperHere = whisperState === 'ready' && !IS_MOBILE;
+  const canWhisperHere = whisperState === 'ready' && !IS_IOS;
   useEffect(() => {
     if (roomId) setMemberMeta(roomId, deviceIdRef.current, { canWhisper: canWhisperHere });
   }, [roomId, canWhisperHere]);
@@ -1994,13 +1998,27 @@ export default function App() {
               </p>
             )}
 
-            {recognitionMode !== 'live' && (
-              <p className="text-[10px] text-zinc-400 leading-relaxed">
-                高精準模式在你的瀏覽器本機執行 Whisper（口音更準、音訊不離開裝置）。首次使用需下載模型（約 145MB），之後瀏覽器會快取。
-              </p>
+            {recognitionMode !== 'live' && IS_IOS && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-[10px] text-amber-700 leading-relaxed">
+                ⚠️ iPhone / iPad 目前不支援本機 Whisper。請改用「即時」模式，或在房間中讓桌機負責轉錄。
+              </div>
             )}
 
-            {recognitionMode !== 'live' && whisperState === 'loading' && (
+            {recognitionMode !== 'live' && !IS_IOS && whisperState === 'idle' && (
+              <div className="space-y-2">
+                <p className="text-[10px] text-zinc-400 leading-relaxed">
+                  高精準模式在瀏覽器本機執行 Whisper（口音更準、音訊不離開裝置）。首次需下載約 145MB 模型。
+                </p>
+                <button
+                  onClick={loadWhisperModel}
+                  className="w-full py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors flex items-center justify-center gap-1.5"
+                >
+                  ⬇ 下載 Whisper 模型
+                </button>
+              </div>
+            )}
+
+            {recognitionMode !== 'live' && !IS_IOS && whisperState === 'loading' && (
               <div className="space-y-1">
                 <div className="flex justify-between text-[10px] font-bold text-zinc-500">
                   <span>模型下載中…首次較久請稍候</span><span>{whisperProgress}%</span>
@@ -2011,7 +2029,7 @@ export default function App() {
               </div>
             )}
 
-            {recognitionMode !== 'live' && whisperState === 'error' && (
+            {recognitionMode !== 'live' && !IS_IOS && whisperState === 'error' && (
               <button onClick={loadWhisperModel} className="text-[11px] font-bold text-red-600 underline self-start">
                 模型載入失敗，點此重試
               </button>
@@ -2033,7 +2051,7 @@ export default function App() {
             {(() => {
               // In a room we capture+relay (no local model needed); only solo
               // Whisper must wait for the model before recording.
-              const whisperBusy = recognitionMode === 'whisper' && !roomId && whisperState !== 'ready';
+              const whisperBusy = recognitionMode === 'whisper' && !roomId && !IS_IOS && whisperState !== 'ready';
               return (
                 <button
                   onClick={toggleRecording}
