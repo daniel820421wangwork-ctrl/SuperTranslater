@@ -469,6 +469,8 @@ export default function App() {
   const whisperJobEntryRef = useRef<Map<number, string>>(new Map());
   // Tracks how many chars of liveDraftTranscript were captured in the previous VAD utterance.
   const lastDraftLengthRef = useRef(0);
+  // In dual mode, the most recent Web-Speech-created entry ID waiting for Whisper.
+  const dualPendingEntryRef = useRef<string | null>(null);
 
   // ===== Multi-device room sync =====
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -1078,20 +1080,26 @@ export default function App() {
 
   // Solo path: transcribe this device's own utterance with local Whisper.
   // Creates a history entry immediately (with optional Web Speech draft) before queuing the job.
-  const transcribeLocal = useCallback((audio: Float32Array, draftOriginal?: string) => {
+  const transcribeLocal = useCallback((audio: Float32Array, draftOriginal?: string, existingEntryId?: string) => {
     if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25 || !whisperReadyRef.current) return;
     normalizeAudio(audio);
-    // Pre-create a history entry so something appears in the right panel right away.
-    const entryId = Math.random().toString(36).substring(7);
-    setHistory(prev => [{
-      id: entryId, original: '', timestamp: Date.now(),
-      hasFinal: false, showingDraft: false,
-      draftOriginal, draftTranslated: undefined,
-    }, ...prev]);
-    if (draftOriginal) {
-      browserTranslate(draftOriginal)
-        .then(t => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, draftTranslated: t } : h)))
-        .catch(() => {});
+    let entryId: string;
+    if (existingEntryId) {
+      // Entry was already created by Web Speech — just attach this Whisper job to it.
+      entryId = existingEntryId;
+    } else {
+      // No prior entry (whisper-only mode or no WS text): create one now.
+      entryId = Math.random().toString(36).substring(7);
+      setHistory(prev => [{
+        id: entryId, original: '', timestamp: Date.now(),
+        hasFinal: false, showingDraft: false,
+        draftOriginal, draftTranslated: undefined,
+      }, ...prev]);
+      if (draftOriginal) {
+        browserTranslate(draftOriginal)
+          .then(t => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, draftTranslated: t } : h)))
+          .catch(() => {});
+      }
     }
     const id = ++whisperJobRef.current;
     whisperJobEntryRef.current.set(id, entryId);
@@ -1112,16 +1120,23 @@ export default function App() {
       });
       setWhisperActivity('listening');
     } else {
-      // In dual mode, capture the Web Speech text that accumulated since the last utterance.
-      let draftText: string | undefined;
       if (recognitionModeRef.current === 'dual') {
-        const full = liveDraftTranscriptRef.current;
-        const delta = full.slice(lastDraftLengthRef.current).trim();
-        const withInterim = (delta + (delta && lastInterimRef.current ? ' ' : '') + lastInterimRef.current).trim();
-        draftText = withInterim || undefined;
-        lastDraftLengthRef.current = full.length; // advance boundary for the next utterance
+        // Entry was already created by Web Speech final; just attach Whisper to it.
+        const existingId = dualPendingEntryRef.current ?? undefined;
+        dualPendingEntryRef.current = null;
+        lastDraftLengthRef.current = liveDraftTranscriptRef.current.length;
+        if (existingId) {
+          transcribeLocal(audio, undefined, existingId);
+        } else {
+          // No WS text for this window — fall back to creating a new entry.
+          const full = liveDraftTranscriptRef.current;
+          const delta = full.slice(lastDraftLengthRef.current).trim();
+          const withInterim = (delta + (delta && lastInterimRef.current ? ' ' : '') + lastInterimRef.current).trim();
+          transcribeLocal(audio, withInterim || undefined);
+        }
+      } else {
+        transcribeLocal(audio);
       }
-      transcribeLocal(audio, draftText);
     }
   }, [transcribeLocal]);
 
@@ -1244,6 +1259,19 @@ export default function App() {
             const next = `${liveDraftTranscriptRef.current} ${finalText}`.trim();
             liveDraftTranscriptRef.current = next;
             setLiveDraftTranscript(next);
+            // Immediately create an entry so both panels show text without waiting for VAD.
+            const clean = finalText.trim();
+            if (clean) {
+              const entryId = Math.random().toString(36).substring(7);
+              setHistory(prev => [{
+                id: entryId, original: clean, draftOriginal: clean,
+                timestamp: Date.now(), hasFinal: false, showingDraft: false, draftTranslated: undefined,
+              }, ...prev]);
+              browserTranslate(clean)
+                .then(t => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, draftTranslated: t } : h)))
+                .catch(() => {});
+              dualPendingEntryRef.current = entryId;
+            }
           } else {
             commitSegment(finalText);
           }
@@ -1286,9 +1314,21 @@ export default function App() {
         // — commit it so we don't drop those words.
         if (lastInterimRef.current.trim()) {
           if (recognitionModeRef.current === 'dual') {
-            const next = `${liveDraftTranscriptRef.current} ${lastInterimRef.current}`.trim();
+            const clean = lastInterimRef.current.trim();
+            const next = `${liveDraftTranscriptRef.current} ${clean}`.trim();
             liveDraftTranscriptRef.current = next;
             setLiveDraftTranscript(next);
+            if (clean) {
+              const entryId = Math.random().toString(36).substring(7);
+              setHistory(prev => [{
+                id: entryId, original: clean, draftOriginal: clean,
+                timestamp: Date.now(), hasFinal: false, showingDraft: false, draftTranslated: undefined,
+              }, ...prev]);
+              browserTranslate(clean)
+                .then(t => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, draftTranslated: t } : h)))
+                .catch(() => {});
+              dualPendingEntryRef.current = entryId;
+            }
           } else {
             commitSegment(lastInterimRef.current);
           }
@@ -1380,6 +1420,7 @@ export default function App() {
     setLiveDraftTranscript('');
     liveDraftTranscriptRef.current = '';
     lastDraftLengthRef.current = 0;
+    dualPendingEntryRef.current = null;
     lastInterimRef.current = '';
     setInterimTranscript('');
 
