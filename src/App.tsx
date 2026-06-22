@@ -522,6 +522,7 @@ export default function App() {
   const deviceIdRef = useRef<string>(getDeviceId());
   const deviceLabelRef = useRef<string>(detectDeviceLabel());
   const roomUnsubsRef = useRef<Array<() => void>>([]);
+  const claimedRoomClipKeysRef = useRef<Set<string>>(new Set());
 
   // Resizable left panel width (px), only used in the side-by-side layout when both panels visible.
   const [leftWidth, setLeftWidth] = useState<number>(() => {
@@ -935,6 +936,7 @@ export default function App() {
     if (roomIdRef.current) leavePresence(roomIdRef.current, deviceIdRef.current);
     roomIdRef.current = null;
     isRoomCreatorRef.current = false;
+    claimedRoomClipKeysRef.current.clear();
     setRoomId(null);
     setRoomMembers([]);
     setRoomConnected(false);
@@ -1000,22 +1002,8 @@ export default function App() {
     const offConfig = subscribeRoomConfig(id, (cfg) => {
       setRoomTranslateMode(cfg?.translateMode === 'browser' ? 'browser' : 'ai');
     });
-    // Only the elected transcriber turns relayed audio clips into text.
-    const offClips = subscribeClips(id, (key, clip) => {
-      if (activeTranscriberRef.current?.id !== deviceIdRef.current) return;
-      if (!whisperReadyRef.current || !whisperWorkerRef.current) return;
-      try {
-        const audio = base64Pcm16ToFloat32(clip.audio);
-        const jobId = ++whisperJobRef.current;
-        clipJobsRef.current.set(jobId, {
-          key, segmentId: clip.segmentId, mode: clip.mode,
-          deviceId: clip.deviceId, deviceLabel: clip.deviceLabel, ts: clip.ts,
-        });
-        enqueueWhisperJob(jobId, audio);
-      } catch (e) { console.error('clip transcribe failed', e); }
-    });
     const offLive = subscribeLiveTranscripts(id, setRoomLiveTranscripts);
-    roomUnsubsRef.current = [offSeg, offMembers, offConn, offConfig, offClips, offLive];
+    roomUnsubsRef.current = [offSeg, offMembers, offConn, offConfig, offLive];
     joinPresence(id, deviceIdRef.current, deviceLabelRef.current);
 
     try {
@@ -1024,7 +1012,7 @@ export default function App() {
       window.history.replaceState({}, '', url.toString());
     } catch {}
     addToast(`已加入房間 ${id}`, 'success');
-  }, [addToast, enqueueWhisperJob]);
+  }, [addToast]);
 
   const createRoom = useCallback(() => {
     const code = makeRoomCode();
@@ -1099,6 +1087,7 @@ export default function App() {
             });
           }
           if (roomIdRef.current) deleteClip(roomIdRef.current, job.key);
+          claimedRoomClipKeysRef.current.delete(job.key);
         } else {
           // Solo local transcription: update the pre-created entry (or remove it on junk).
           const entryId = whisperJobEntryRef.current.get(msg.id);
@@ -1668,6 +1657,31 @@ export default function App() {
   }, [roomMembers]);
   const activeTranscriberRef = useRef(activeTranscriber);
   useEffect(() => { activeTranscriberRef.current = activeTranscriber; });
+
+  // The elected room transcriber subscribes only when Whisper is ready.
+  // Re-subscribing replays still-existing RTDB clips, so clips captured while
+  // the model was loading are not lost. The claim set prevents duplicate jobs.
+  useEffect(() => {
+    if (!roomId || whisperState !== 'ready') return;
+    if (!activeTranscriber || activeTranscriber.id !== deviceIdRef.current) return;
+    const unsubscribe = subscribeClips(roomId, (key, clip) => {
+      if (claimedRoomClipKeysRef.current.has(key)) return;
+      claimedRoomClipKeysRef.current.add(key);
+      try {
+        const audio = base64Pcm16ToFloat32(clip.audio);
+        const jobId = ++whisperJobRef.current;
+        clipJobsRef.current.set(jobId, {
+          key, segmentId: clip.segmentId, mode: clip.mode,
+          deviceId: clip.deviceId, deviceLabel: clip.deviceLabel, ts: clip.ts,
+        });
+        enqueueWhisperJob(jobId, audio);
+      } catch (error) {
+        claimedRoomClipKeysRef.current.delete(key);
+        console.error('clip transcribe failed', error);
+      }
+    });
+    return unsubscribe;
+  }, [activeTranscriber, enqueueWhisperJob, roomId, whisperState]);
 
   // Pick a provider this device can actually translate with: prefer the
   // selected engine if it has a key, otherwise fall back to ANY key the
