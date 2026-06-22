@@ -907,8 +907,9 @@ export default function App() {
       const segmentId = Math.random().toString(36).substring(7);
       setHistory(prev => [{
         id: segmentId, original: clean, timestamp: Date.now(),
+        deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current,
         mode, status: mode === 'dual' ? 'whisper-processing' : 'translating',
-        hasFinal: mode === 'live' ? false : false, showingDraft: false,
+        hasFinal: false, showingDraft: false,
         draftOriginal: mode === 'dual' ? clean : undefined,
         draftTranslated: mode === 'dual' ? '等待翻譯' : undefined,
       }, ...prev]);
@@ -1113,6 +1114,7 @@ export default function App() {
             const fallbackId = Math.random().toString(36).substring(7);
             setHistory(prev => [{
               id: fallbackId, original: cleaned, timestamp: Date.now(),
+              deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current,
               mode: 'whisper', status: 'translating',
               hasFinal: false, showingDraft: false,
             }, ...prev]);
@@ -1174,6 +1176,7 @@ export default function App() {
       entryId = Math.random().toString(36).substring(7);
       setHistory(prev => [{
         id: entryId, original: '', timestamp: Date.now(),
+        deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current,
         mode: 'whisper', status: 'whisper-processing',
         hasFinal: false, showingDraft: false,
         draftOriginal, draftTranslated: undefined,
@@ -2172,7 +2175,9 @@ export default function App() {
                             : "text-zinc-700"
                         )}
                       >
-                        {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}：</span>}
+                        <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">
+                          {h.deviceLabel || deviceLabelRef.current}：
+                        </span>
                         {displayText}
                       </p>
                     );
@@ -2182,7 +2187,9 @@ export default function App() {
                     .filter(([id, lt]) => id !== deviceIdRef.current && lt.text)
                     .map(([id, lt]) => (
                       <p key={id} style={{ fontSize: transFontPx }} className="leading-relaxed text-blue-500 italic">
-                        {lt.label && <span className="text-[10px] font-bold text-blue-300 mr-1.5 align-middle not-italic">{lt.label}：</span>}
+                        <span className="text-[10px] font-bold text-blue-300 mr-1.5 align-middle not-italic">
+                          {lt.label || '裝置'}：
+                        </span>
                         {lt.text}
                       </p>
                     ))
@@ -2451,7 +2458,9 @@ export default function App() {
                         : "text-zinc-500"
                     )}
                   >
-                    {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}：</span>}
+                    <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">
+                      {h.deviceLabel || deviceLabelRef.current}：
+                    </span>
                     {displayText}
                   </p>
                 );
@@ -2552,8 +2561,13 @@ export default function App() {
                   const isEditing = editingId === entry.id;
                   const isProcessing = !entry.hasFinal;
                   const hasDraftComparison = entry.hasFinal && !!entry.draftOriginal;
-                  const mainOriginal = entry.original || entry.draftOriginal || '';
-                  const mainTranslated = entry.translated ?? (isProcessing ? entry.draftTranslated : undefined);
+                  const isWhisperProcessing = entry.mode === 'dual' && entry.status === 'whisper-processing';
+                  const mainOriginal = isWhisperProcessing
+                    ? (entry.draftOriginal || entry.original || '')
+                    : (entry.original || entry.draftOriginal || '');
+                  const mainTranslated = isWhisperProcessing
+                    ? (entry.draftTranslated || entry.translated || '等待翻譯')
+                    : (entry.translated ?? (isProcessing ? entry.draftTranslated : undefined));
                   const toggleComparison = (e: React.MouseEvent) => {
                     e.stopPropagation();
                     setHistory(prev => prev.map(h => h.id === entry.id ? { ...h, showingDraft: !h.showingDraft } : h));
@@ -2587,12 +2601,12 @@ export default function App() {
                           <span className="text-[10px] font-mono text-zinc-400">
                             {new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                           </span>
-                          {entry.deviceLabel && (
-                            <span className={cn(
-                              "text-[9px] font-bold px-1.5 py-0.5 rounded-md",
-                              entry.deviceId === deviceIdRef.current ? "bg-indigo-50 text-indigo-600" : "bg-emerald-50 text-emerald-600"
-                            )}>{entry.deviceLabel}</span>
-                          )}
+                          <span className={cn(
+                            "text-[9px] font-bold px-1.5 py-0.5 rounded-md",
+                            !entry.deviceId || entry.deviceId === deviceIdRef.current
+                              ? "bg-indigo-50 text-indigo-600"
+                              : "bg-emerald-50 text-emerald-600"
+                          )}>{entry.deviceLabel || deviceLabelRef.current}</span>
                         </div>
                         <div className="flex items-center gap-1.5">
                           {isProcessing ? (
@@ -2683,6 +2697,10 @@ export default function App() {
                                 </span>
                               )}
                             </div>
+                          ) : entry.mode === 'dual' ? (
+                            <p style={{ fontSize: transFontPx }} className="text-zinc-500 leading-relaxed font-bold">
+                              等待翻譯
+                            </p>
                           ) : (
                             <div className="flex items-center gap-1.5 text-indigo-400 font-medium py-1">
                               <div className="flex gap-1">
