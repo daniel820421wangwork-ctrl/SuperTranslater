@@ -2362,14 +2362,13 @@ export default function App() {
               <div className="space-y-2.5">
                 {history.map((entry) => {
                   const isEditing = editingId === entry.id;
-                  // Draft = Web Speech + browser translate; Final = Whisper + configured translate.
-                  const showDraft = entry.showingDraft && !!entry.draftOriginal;
-                  const dispOriginal = showDraft ? entry.draftOriginal! : (entry.original || entry.draftOriginal || '');
-                  const dispTranslated = showDraft ? entry.draftTranslated : entry.translated;
-                  const canToggle = entry.hasFinal && !!entry.draftOriginal && (
+                  const isProcessing = !entry.hasFinal;
+                  const hasDraftComparison = entry.hasFinal && !!entry.draftOriginal && (
                     entry.draftOriginal !== entry.original || entry.draftTranslated !== entry.translated
                   );
-                  const toggleEntry = (e: React.MouseEvent) => {
+                  const mainOriginal = entry.original || entry.draftOriginal || '';
+                  const mainTranslated = entry.translated ?? (isProcessing ? entry.draftTranslated : undefined);
+                  const toggleComparison = (e: React.MouseEvent) => {
                     e.stopPropagation();
                     setHistory(prev => prev.map(h => h.id === entry.id ? { ...h, showingDraft: !h.showingDraft } : h));
                   };
@@ -2384,117 +2383,156 @@ export default function App() {
                         el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                         setTimeout(() => setHighlightedSegId(null), 2500);
                       }}
-                      className="group/entry transition-all cursor-pointer grid grid-cols-1 md:grid-cols-2 gap-3 border border-zinc-100 p-2.5 md:p-3 rounded-xl hover:bg-zinc-50/50 hover:border-zinc-200 shadow-sm"
+                      className={cn(
+                        "group/entry transition-all cursor-pointer rounded-xl shadow-sm overflow-hidden border",
+                        isProcessing
+                          ? "border-amber-200 border-l-4 border-l-amber-400"
+                          : hasDraftComparison
+                            ? "border-indigo-200 border-l-4 border-l-indigo-500"
+                            : "border-zinc-100 hover:border-zinc-200"
+                      )}
                     >
-                        <>
-                          {/* Comfortable: English card */}
-                          <div className="space-y-1">
-                            <div className="flex items-center justify-between text-[9px] text-zinc-400 font-mono">
-                              <span className="font-bold text-indigo-500 uppercase tracking-widest flex items-center gap-1">
-                                <FileText className="w-2.5 h-2.5 text-indigo-400" />
-                                English
-                              </span>
+                      {/* Card header: timestamp + status badge + actions */}
+                      <div className={cn(
+                        "flex items-center justify-between px-3 py-1.5 border-b",
+                        isProcessing ? "bg-amber-50/60 border-amber-100" : "bg-zinc-50/60 border-zinc-100"
+                      )}>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-mono text-zinc-400">
+                            {new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                          </span>
+                          {entry.deviceLabel && (
+                            <span className={cn(
+                              "text-[9px] font-bold px-1.5 py-0.5 rounded-md",
+                              entry.deviceId === deviceIdRef.current ? "bg-indigo-50 text-indigo-600" : "bg-emerald-50 text-emerald-600"
+                            )}>{entry.deviceLabel}</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          {isProcessing ? (
+                            <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 flex items-center gap-1 select-none">
+                              <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse inline-block" />
+                              Whisper 處理中
+                            </span>
+                          ) : hasDraftComparison ? (
+                            <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 select-none">
+                              🎯 Whisper 精準版
+                            </span>
+                          ) : null}
+                          {!isEditing && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setEditingId(entry.id); setEditingText(entry.original); }}
+                              className="text-zinc-300 hover:text-indigo-500 p-0.5 rounded hover:bg-zinc-100 transition-colors opacity-0 group-hover/entry:opacity-100"
+                              title="手動修正英文內容"
+                            >
+                              <Edit className="w-3 h-3" />
+                            </button>
+                          )}
+                          {mainTranslated && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(mainTranslated!); addToast('複製成功！', 'success'); }}
+                              className="text-zinc-300 hover:text-indigo-500 p-0.5 rounded hover:bg-zinc-100 transition-colors opacity-0 group-hover/entry:opacity-100"
+                              title="複製翻譯結果"
+                            >
+                              <Copy className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Main 2-column content */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-zinc-100">
+                        {/* English column */}
+                        <div className="p-2.5 md:p-3 space-y-1.5">
+                          <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-widest select-none">
+                            English{hasDraftComparison ? ' · Whisper' : ''}
+                          </p>
+                          {isEditing ? (
+                            <div className="space-y-1.5">
+                              <textarea
+                                value={editingText}
+                                onChange={(e) => setEditingText(e.target.value)}
+                                className="w-full min-h-[70px] p-2 bg-zinc-50 border border-zinc-200 rounded-lg text-xs outline-none focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 transition-all resize-y font-sans leading-relaxed shadow-inner"
+                                placeholder="在此修改英文聽寫內容..."
+                              />
                               <div className="flex items-center gap-1.5">
-                                {entry.deviceLabel && (
-                                  <span className={cn(
-                                    "text-[9px] font-bold px-1.5 py-0.5 rounded-md",
-                                    entry.deviceId === deviceIdRef.current ? "bg-indigo-50 text-indigo-600" : "bg-emerald-50 text-emerald-600"
-                                  )}>{entry.deviceLabel}</span>
-                                )}
-                                <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
-                                {!isEditing && (
-                                  <button
-                                    onClick={() => {
-                                      setEditingId(entry.id);
-                                      setEditingText(entry.original);
-                                    }}
-                                    className="text-zinc-400 hover:text-indigo-600 transition-colors flex items-center gap-0.5 p-0.5 rounded hover:bg-zinc-100"
-                                    title="修正此段落的語音聽寫內容"
-                                  >
-                                    <Edit className="w-2.5 h-2.5" />
-                                    <span className="text-[8px] font-bold">手動修正</span>
-                                  </button>
-                                )}
+                                <button
+                                  onClick={() => handleSaveSegmentEdit(entry.id)}
+                                  className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[9px] rounded-md transition-all flex items-center gap-1 shadow-sm"
+                                >
+                                  <Check className="w-2.5 h-2.5" />
+                                  儲存並重新翻譯
+                                </button>
+                                <button
+                                  onClick={() => { setEditingId(null); setEditingText(''); }}
+                                  className="px-2 py-1 bg-zinc-100 hover:bg-zinc-200 text-zinc-600 font-bold text-[9px] rounded-md transition-all"
+                                >
+                                  取消
+                                </button>
                               </div>
                             </div>
+                          ) : (
+                            <p className="text-zinc-700 text-[13.5px] leading-relaxed">
+                              {mainOriginal || <span className="text-zinc-300 italic text-xs">處理中…</span>}
+                            </p>
+                          )}
+                        </div>
 
-                            {isEditing ? (
-                              <div className="space-y-1.5">
-                                <textarea
-                                  value={editingText}
-                                  onChange={(e) => setEditingText(e.target.value)}
-                                  className="w-full min-h-[70px] p-2 bg-zinc-50 border border-zinc-200 rounded-lg text-xs outline-none focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 transition-all resize-y text-zinc-805 font-sans leading-relaxed shadow-inner"
-                                  placeholder="在此修改英文聽寫內容..."
-                                />
-                                <div className="flex items-center gap-1.5 pt-0.5">
-                                  <button
-                                    onClick={() => handleSaveSegmentEdit(entry.id)}
-                                    className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[9px] rounded-md transition-all flex items-center gap-1 shadow-sm"
-                                  >
-                                    <Check className="w-2.5 h-2.5" />
-                                    儲存並比對翻譯
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      setEditingId(null);
-                                      setEditingText('');
-                                    }}
-                                    className="px-2 py-1 bg-zinc-100 hover:bg-zinc-200 text-zinc-650 font-bold text-[9px] rounded-md transition-all"
-                                  >
-                                    取消
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              <p className="text-zinc-700 text-[13.5px] leading-relaxed font-normal">
-                                {dispOriginal || <span className="text-zinc-300 italic text-xs">Whisper 處理中…</span>}
-                              </p>
-                            )}
-                          </div>
-
-                          {/* Comfortable: Chinese translation card */}
-                          <div className="flex flex-col justify-between space-y-1 border-t md:border-t-0 md:border-l border-zinc-100 pt-2 md:pt-0 md:pl-3">
-                            <div>
-                              <div className="flex items-center justify-between text-[9px] text-zinc-400 font-mono mb-0.5">
-                                <span className="font-bold text-indigo-600 uppercase tracking-widest">Translation (TW)</span>
-                                {dispTranslated && (
-                                  <button
-                                    onClick={() => {
-                                      navigator.clipboard.writeText(dispTranslated!);
-                                      addToast('複製成功！', 'success');
-                                    }}
-                                    className="p-1 hover:text-indigo-600 transition-colors opacity-40 group-hover/entry:opacity-100"
-                                    title="複製翻譯結果"
-                                  >
-                                    <Copy className="w-3 h-3" />
-                                  </button>
-                                )}
-                              </div>
-                              {dispTranslated ? (
-                                <div className="space-y-0.5">
-                                  <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{dispTranslated}</p>
-                                  {!showDraft && entry.translatedBy && <span className="text-[9px] text-zinc-400 font-medium select-none">{entry.translatedBy}</span>}
-                                  {showDraft && <span className="text-[9px] text-blue-400 font-medium select-none">⚡ 即時瀏覽器翻譯</span>}
-                                </div>
-                              ) : (
-                                <div className="flex items-center gap-1.5 text-indigo-400 font-medium py-1">
-                                  <div className="flex gap-1">
-                                    <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
-                                    <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
-                                    <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></span>
-                                  </div>
-                                  <span className="text-[11.5px] italic">{entry.hasFinal ? '翻譯中...' : 'Whisper 處理中...'}</span>
-                                </div>
+                        {/* Translation column */}
+                        <div className="p-2.5 md:p-3 space-y-1.5">
+                          <p className="text-[9px] font-bold text-indigo-600 uppercase tracking-widest select-none">Translation (TW)</p>
+                          {mainTranslated ? (
+                            <div className="space-y-1">
+                              <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{mainTranslated}</p>
+                              {!isProcessing && entry.translatedBy && (
+                                <span className="text-[9px] text-zinc-400 font-medium select-none">{entry.translatedBy}</span>
+                              )}
+                              {isProcessing && (
+                                <span className="text-[9px] text-amber-500 font-medium select-none">⚡ 瀏覽器翻譯（等待 Whisper）</span>
                               )}
                             </div>
-                            {canToggle && (
-                              <button onClick={toggleEntry} className="text-[9px] font-bold px-2 py-1 rounded-lg border transition-colors select-none self-start"
-                                style={showDraft ? { borderColor: '#bfdbfe', color: '#3b82f6', background: '#eff6ff' } : { borderColor: '#d1fae5', color: '#059669', background: '#f0fdf4' }}>
-                                {showDraft ? '⚡ 即時稿 → 切換精準版' : '🎯 精準版 → 切換即時稿'}
-                              </button>
-                            )}
-                          </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5 text-indigo-400 font-medium py-1">
+                              <div className="flex gap-1">
+                                <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                                <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                                <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></span>
+                              </div>
+                              <span className="text-[11.5px] italic">{isProcessing ? 'Whisper 處理中...' : '翻譯中...'}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Draft comparison expandable section */}
+                      {hasDraftComparison && (
+                        <>
+                          <button
+                            onClick={toggleComparison}
+                            className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-bold text-zinc-400 hover:text-zinc-600 border-t border-zinc-100 hover:bg-zinc-50/80 transition-colors select-none"
+                          >
+                            <span className="text-[8px]">{entry.showingDraft ? '▲' : '▼'}</span>
+                            {entry.showingDraft ? '收起即時草稿比對' : '查看即時草稿比對'}
+                            <span className="ml-auto text-[9px] font-normal text-zinc-300 normal-case">Web Speech + 瀏覽器翻譯</span>
+                          </button>
+                          {entry.showingDraft && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-amber-100 border-t border-amber-100 bg-amber-50/40">
+                              <div className="p-2.5 md:p-3 space-y-1">
+                                <p className="text-[9px] font-bold text-amber-600 uppercase tracking-widest select-none">⚡ 即時草稿 (Web Speech)</p>
+                                <p className="text-amber-900/80 text-[13px] leading-relaxed">{entry.draftOriginal}</p>
+                              </div>
+                              <div className="p-2.5 md:p-3 space-y-1">
+                                <p className="text-[9px] font-bold text-amber-600 uppercase tracking-widest select-none">⚡ 瀏覽器翻譯</p>
+                                {entry.draftTranslated ? (
+                                  <p style={{ fontSize: transFontPx }} className="text-amber-900/80 leading-relaxed font-bold">{entry.draftTranslated}</p>
+                                ) : (
+                                  <p className="text-amber-300 italic text-xs">—</p>
+                                )}
+                              </div>
+                            </div>
+                          )}
                         </>
+                      )}
                     </motion.div>
                   );
                 })}
