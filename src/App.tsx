@@ -333,7 +333,14 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   
   // History / Transcript State
-  const [history, setHistory] = useState<{id: string, original: string, translated?: string, timestamp: number, deviceLabel?: string, deviceId?: string, translatedBy?: string}[]>([]);
+  const [history, setHistory] = useState<{
+    id: string; original: string; translated?: string; timestamp: number;
+    deviceLabel?: string; deviceId?: string; translatedBy?: string;
+    draftOriginal?: string;    // Immediate Web Speech text (dual mode) or undefined
+    draftTranslated?: string;  // Browser-translate of draftOriginal
+    hasFinal: boolean;         // true once Whisper + configured translate are done
+    showingDraft: boolean;     // user toggle: true = show draft, false = show final
+  }[]>([]);
   
   // Speech Recognition States
   const [isRecording, setIsRecording] = useState(false);
@@ -458,6 +465,10 @@ export default function App() {
   // Jobs where this device transcribes someone else's relayed clip:
   // jobId -> the clip's key + originating device, so the result is attributed right.
   const clipJobsRef = useRef<Map<number, { key: string; deviceId: string; deviceLabel: string; ts: number }>>(new Map());
+  // Maps solo Whisper jobId → pre-created history entry id so the result updates the right row.
+  const whisperJobEntryRef = useRef<Map<number, string>>(new Map());
+  // Tracks how many chars of liveDraftTranscript were captured in the previous VAD utterance.
+  const lastDraftLengthRef = useRef(0);
 
   // ===== Multi-device room sync =====
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -832,16 +843,26 @@ export default function App() {
       });
     } else {
       const segmentId = Math.random().toString(36).substring(7);
-      setHistory(prev => [{ id: segmentId, original: clean, timestamp: Date.now() }, ...prev]);
+      // Create entry immediately with draft fields; hasFinal becomes true once configured translate arrives.
+      setHistory(prev => [{
+        id: segmentId, original: clean, timestamp: Date.now(),
+        hasFinal: false, showingDraft: false,
+        draftOriginal: clean, draftTranslated: undefined,
+      }, ...prev]);
+      // Browser-translate immediately as the draft (fast preview).
+      browserTranslate(clean)
+        .then(t => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, draftTranslated: t } : h)))
+        .catch(() => {});
       const mode = effectiveTranslateModeRef.current;
       if (mode === 'browser') {
         browserTranslate(clean)
-          .then(t => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translated: t, translatedBy: transLabelFor('browser', null) } : h)))
-          .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translated: '[翻譯失敗，此瀏覽器不支援內建翻譯]' } : h)));
+          .then(t => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translated: t, translatedBy: transLabelFor('browser', null), hasFinal: true } : h)))
+          .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translated: '[翻譯失敗，此瀏覽器不支援內建翻譯]', hasFinal: true } : h)));
       } else {
         const label = transLabelFor('ai', keyInfoRef.current);
         Promise.resolve(translateSegmentRef.current(clean, segmentId))
-          .then(() => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translatedBy: label } : h)));
+          .then(() => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translatedBy: label, hasFinal: true } : h)))
+          .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, hasFinal: true } : h)));
       }
     }
   }, []);
@@ -888,11 +909,12 @@ export default function App() {
           id: key, original: seg.original,
           translated: seg.translated ?? undefined, timestamp: seg.ts,
           deviceLabel: seg.deviceLabel, deviceId: seg.deviceId, translatedBy: seg.translatedBy,
+          hasFinal: !!seg.translated, showingDraft: false,
         }];
         next.sort((a, b) => b.timestamp - a.timestamp);
         return next;
       }),
-      (key, seg) => setHistory(prev => prev.map(h => h.id === key ? { ...h, translated: seg.translated ?? h.translated, translatedBy: seg.translatedBy ?? h.translatedBy } : h)),
+      (key, seg) => setHistory(prev => prev.map(h => h.id === key ? { ...h, translated: seg.translated ?? h.translated, translatedBy: seg.translatedBy ?? h.translatedBy, hasFinal: h.hasFinal || !!seg.translated } : h)),
     );
     const offMembers = subscribeMembers(id, setRoomMembers);
     const offConn = subscribeConnection(setRoomConnected);
@@ -991,8 +1013,28 @@ export default function App() {
             });
           }
           if (roomIdRef.current) deleteClip(roomIdRef.current, job.key);
-        } else if (cleaned && !isJunkTranscript(cleaned)) {
-          commitSegment(cleaned); // solo local transcription
+        } else {
+          // Solo local transcription: update the pre-created entry (or remove it on junk).
+          const entryId = whisperJobEntryRef.current.get(msg.id);
+          whisperJobEntryRef.current.delete(msg.id);
+          if (!cleaned || isJunkTranscript(cleaned)) {
+            if (entryId) setHistory(prev => prev.filter(h => h.id !== entryId));
+          } else if (entryId) {
+            setHistory(prev => prev.map(h => h.id === entryId ? { ...h, original: cleaned } : h));
+            const mode = effectiveTranslateModeRef.current;
+            if (mode === 'browser') {
+              browserTranslate(cleaned)
+                .then(t => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, translated: t, translatedBy: transLabelFor('browser', null), hasFinal: true } : h)))
+                .catch(() => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, translated: '[翻譯失敗]', hasFinal: true } : h)));
+            } else {
+              const label = transLabelFor('ai', keyInfoRef.current);
+              Promise.resolve(translateSegmentRef.current(cleaned, entryId))
+                .then(() => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, translatedBy: label, hasFinal: true } : h)))
+                .catch(() => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, hasFinal: true } : h)));
+            }
+          } else {
+            commitSegment(cleaned); // fallback: no pre-created entry
+          }
         }
       }
     };
@@ -1035,10 +1077,24 @@ export default function App() {
   };
 
   // Solo path: transcribe this device's own utterance with local Whisper.
-  const transcribeLocal = useCallback((audio: Float32Array) => {
+  // Creates a history entry immediately (with optional Web Speech draft) before queuing the job.
+  const transcribeLocal = useCallback((audio: Float32Array, draftOriginal?: string) => {
     if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25 || !whisperReadyRef.current) return;
     normalizeAudio(audio);
+    // Pre-create a history entry so something appears in the right panel right away.
+    const entryId = Math.random().toString(36).substring(7);
+    setHistory(prev => [{
+      id: entryId, original: '', timestamp: Date.now(),
+      hasFinal: false, showingDraft: false,
+      draftOriginal, draftTranslated: undefined,
+    }, ...prev]);
+    if (draftOriginal) {
+      browserTranslate(draftOriginal)
+        .then(t => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, draftTranslated: t } : h)))
+        .catch(() => {});
+    }
     const id = ++whisperJobRef.current;
+    whisperJobEntryRef.current.set(id, entryId);
     whisperPendingJobsRef.current += 1;
     setWhisperActivity('transcribing');
     whisperWorkerRef.current?.postMessage({ type: 'transcribe', id, audio, language: 'english' }, [audio.buffer]);
@@ -1056,7 +1112,16 @@ export default function App() {
       });
       setWhisperActivity('listening');
     } else {
-      transcribeLocal(audio);
+      // In dual mode, capture the Web Speech text that accumulated since the last utterance.
+      let draftText: string | undefined;
+      if (recognitionModeRef.current === 'dual') {
+        const full = liveDraftTranscriptRef.current;
+        const delta = full.slice(lastDraftLengthRef.current).trim();
+        const withInterim = (delta + (delta && lastInterimRef.current ? ' ' : '') + lastInterimRef.current).trim();
+        draftText = withInterim || undefined;
+        lastDraftLengthRef.current = full.length; // advance boundary for the next utterance
+      }
+      transcribeLocal(audio, draftText);
     }
   }, [transcribeLocal]);
 
@@ -1314,6 +1379,7 @@ export default function App() {
     if (liveRecognitionActiveRef.current || whisperRecordingActiveRef.current) return;
     setLiveDraftTranscript('');
     liveDraftTranscriptRef.current = '';
+    lastDraftLengthRef.current = 0;
     lastInterimRef.current = '';
     setInterimTranscript('');
 
@@ -2329,6 +2395,17 @@ export default function App() {
               <div className={isCompact ? "" : "space-y-2.5"}>
                 {history.map((entry) => {
                   const isEditing = editingId === entry.id;
+                  // Draft = Web Speech + browser translate; Final = Whisper + configured translate.
+                  const showDraft = entry.showingDraft && !!entry.draftOriginal;
+                  const dispOriginal = showDraft ? entry.draftOriginal! : (entry.original || entry.draftOriginal || '');
+                  const dispTranslated = showDraft ? entry.draftTranslated : entry.translated;
+                  const canToggle = entry.hasFinal && !!entry.draftOriginal && (
+                    entry.draftOriginal !== entry.original || entry.draftTranslated !== entry.translated
+                  );
+                  const toggleEntry = (e: React.MouseEvent) => {
+                    e.stopPropagation();
+                    setHistory(prev => prev.map(h => h.id === entry.id ? { ...h, showingDraft: !h.showingDraft } : h));
+                  };
                   return (
                     <motion.div
                       key={entry.id}
@@ -2416,16 +2493,19 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-zinc-750 text-[13px] leading-relaxed font-normal">{entry.original}</p>
+                              <p className="text-zinc-750 text-[13px] leading-relaxed font-normal">
+                                {dispOriginal || <span className="text-zinc-300 italic text-xs">Whisper 處理中…</span>}
+                              </p>
                             )}
                           </div>
 
                           {/* Right column: Chinese translation */}
-                          <div className="md:col-span-5 border-t border-dashed border-zinc-100 pt-1.5 md:pt-0 md:border-t-0 md:border-l md:pl-3.5 min-w-0">
-                            {entry.translated ? (
+                          <div className="md:col-span-5 border-t border-dashed border-zinc-100 pt-1.5 md:pt-0 md:border-t-0 md:border-l md:pl-3.5 min-w-0 space-y-1">
+                            {dispTranslated ? (
                               <div className="space-y-0.5">
-                                <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{entry.translated}</p>
-                                {entry.translatedBy && <span className="text-[9px] text-zinc-400 font-medium select-none">{entry.translatedBy}</span>}
+                                <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{dispTranslated}</p>
+                                {!showDraft && entry.translatedBy && <span className="text-[9px] text-zinc-400 font-medium select-none">{entry.translatedBy}</span>}
+                                {showDraft && <span className="text-[9px] text-blue-400 font-medium select-none">⚡ 即時瀏覽器翻譯</span>}
                               </div>
                             ) : (
                               <div className="flex items-center gap-1 text-indigo-400 font-medium py-0.5 select-none">
@@ -2436,6 +2516,12 @@ export default function App() {
                                 </div>
                                 <span className="text-[11px] italic">翻譯中...</span>
                               </div>
+                            )}
+                            {canToggle && (
+                              <button onClick={toggleEntry} className="text-[9px] font-bold px-1.5 py-0.5 rounded-md border transition-colors select-none mt-0.5 block"
+                                style={showDraft ? { borderColor: '#bfdbfe', color: '#3b82f6', background: '#eff6ff' } : { borderColor: '#d1fae5', color: '#059669', background: '#f0fdf4' }}>
+                                {showDraft ? '⚡ 即時稿 → 切換精準版' : '🎯 精準版 → 切換即時稿'}
+                              </button>
                             )}
                           </div>
                         </>
@@ -2500,7 +2586,9 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-zinc-700 text-[13.5px] leading-relaxed font-normal">{entry.original}</p>
+                              <p className="text-zinc-700 text-[13.5px] leading-relaxed font-normal">
+                                {dispOriginal || <span className="text-zinc-300 italic text-xs">Whisper 處理中…</span>}
+                              </p>
                             )}
                           </div>
 
@@ -2509,10 +2597,10 @@ export default function App() {
                             <div>
                               <div className="flex items-center justify-between text-[9px] text-zinc-400 font-mono mb-0.5">
                                 <span className="font-bold text-indigo-600 uppercase tracking-widest">Translation (TW)</span>
-                                {entry.translated && (
-                                  <button 
+                                {dispTranslated && (
+                                  <button
                                     onClick={() => {
-                                      navigator.clipboard.writeText(entry.translated!);
+                                      navigator.clipboard.writeText(dispTranslated!);
                                       addToast('複製成功！', 'success');
                                     }}
                                     className="p-1 hover:text-indigo-600 transition-colors opacity-40 group-hover/entry:opacity-100"
@@ -2522,10 +2610,11 @@ export default function App() {
                                   </button>
                                 )}
                               </div>
-                              {entry.translated ? (
+                              {dispTranslated ? (
                                 <div className="space-y-0.5">
-                                  <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{entry.translated}</p>
-                                  {entry.translatedBy && <span className="text-[9px] text-zinc-400 font-medium select-none">{entry.translatedBy}</span>}
+                                  <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{dispTranslated}</p>
+                                  {!showDraft && entry.translatedBy && <span className="text-[9px] text-zinc-400 font-medium select-none">{entry.translatedBy}</span>}
+                                  {showDraft && <span className="text-[9px] text-blue-400 font-medium select-none">⚡ 即時瀏覽器翻譯</span>}
                                 </div>
                               ) : (
                                 <div className="flex items-center gap-1.5 text-indigo-400 font-medium py-1">
@@ -2534,10 +2623,16 @@ export default function App() {
                                     <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
                                     <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></span>
                                   </div>
-                                  <span className="text-[11.5px] italic">法醫級精準比對翻譯中...</span>
+                                  <span className="text-[11.5px] italic">{entry.hasFinal ? '翻譯中...' : 'Whisper 處理中...'}</span>
                                 </div>
                               )}
                             </div>
+                            {canToggle && (
+                              <button onClick={toggleEntry} className="text-[9px] font-bold px-2 py-1 rounded-lg border transition-colors select-none self-start"
+                                style={showDraft ? { borderColor: '#bfdbfe', color: '#3b82f6', background: '#eff6ff' } : { borderColor: '#d1fae5', color: '#059669', background: '#f0fdf4' }}>
+                                {showDraft ? '⚡ 即時稿 → 切換精準版' : '🎯 精準版 → 切換即時稿'}
+                              </button>
+                            )}
                           </div>
                         </>
                       )}
