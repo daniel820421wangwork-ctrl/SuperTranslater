@@ -537,6 +537,7 @@ export default function App() {
   const recognitionRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const liveScrollRef = useRef<HTMLDivElement>(null);
+  const shouldFollowLiveTranscriptRef = useRef(true);
 
   // Backup settings to localStorage
   useEffect(() => {
@@ -1918,11 +1919,22 @@ export default function App() {
   // When any device (local or remote) is recording, the left panel switches to
   // a continuous full-transcript view.
   const someoneRecording = isRecording || roomMembers.some(m => m.recording);
+  const handleLiveTranscriptScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    const target = event.currentTarget;
+    const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+    shouldFollowLiveTranscriptRef.current = distanceFromBottom <= 48;
+  }, []);
+
   useEffect(() => {
-    if (someoneRecording && liveScrollRef.current) {
-      liveScrollRef.current.scrollTop = liveScrollRef.current.scrollHeight;
-    }
-  }, [history, interimTranscript, someoneRecording]);
+    if (!someoneRecording || !shouldFollowLiveTranscriptRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      const container = liveScrollRef.current;
+      if (container && shouldFollowLiveTranscriptRef.current) {
+        container.scrollTop = container.scrollHeight;
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [history, interimTranscript, liveDraftTranscript, roomLiveTranscripts, someoneRecording]);
 
   return (
     <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 flex flex-col lg:h-screen overflow-x-hidden lg:overflow-hidden">
@@ -2152,7 +2164,11 @@ export default function App() {
                 </button>
               )}
             </div>
-            <div ref={liveScrollRef} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 space-y-2">
+            <div
+              ref={liveScrollRef}
+              onScroll={handleLiveTranscriptScroll}
+              className="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 space-y-2"
+            >
               {history.length === 0 && !interimTranscript ? (
                 <p className="text-sm text-zinc-300 mt-8 text-center select-none">開始講話，逐字稿會在此連續顯示…</p>
               ) : (
@@ -2439,7 +2455,11 @@ export default function App() {
 
           {/* Transcript history — always visible for cross-panel highlight */}
           {history.length > 0 && (
-            <div ref={liveScrollRef} className="overflow-y-auto max-h-[35vh] space-y-1 -mx-1">
+            <div
+              ref={liveScrollRef}
+              onScroll={handleLiveTranscriptScroll}
+              className="overflow-y-auto max-h-[35vh] space-y-1 -mx-1"
+            >
               {[...history].reverse().map(h => {
                 if (h.mode === 'whisper') {
                   if (h.hasFinal) return null;
