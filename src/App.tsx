@@ -2316,36 +2316,6 @@ export default function App() {
             </div>
             
             <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-              {/* Compact / Comfortable density toggle (segmented control) */}
-              <div
-                className="flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-200 bg-zinc-100 text-[10px] font-extrabold select-none"
-                role="group"
-                aria-label="顯示密度"
-              >
-                <button
-                  type="button"
-                  onClick={() => setIsCompact(true)}
-                  title="緊湊高密度：每段佔用較少空間，一次看更多"
-                  className={cn(
-                    "px-2 py-1 rounded-md flex items-center gap-1 transition-all",
-                    isCompact ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
-                  )}
-                >
-                  ⚡ 緊湊
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsCompact(false)}
-                  title="舒適卡片：每段獨立卡片，留白較多較好讀"
-                  className={cn(
-                    "px-2 py-1 rounded-md flex items-center gap-1 transition-all",
-                    !isCompact ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
-                  )}
-                >
-                  📖 舒適
-                </button>
-              </div>
-
               {/* Chinese translation font size */}
               <div className="flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-200 bg-zinc-100 select-none" title="調整中文翻譯字級">
                 <button
@@ -2378,10 +2348,7 @@ export default function App() {
           <div 
             ref={scrollRef}
             onScroll={handleScroll}
-            className={cn(
-              "flex-1 overflow-y-auto pr-1 custom-scrollbar",
-              isCompact ? "space-y-0" : "space-y-2.5"
-            )}
+            className="flex-1 overflow-y-auto pr-1 custom-scrollbar space-y-2.5"
           >
             {history.length === 0 ? (
               <div className="h-64 flex flex-col items-center justify-center text-zinc-300 text-center">
@@ -2392,7 +2359,7 @@ export default function App() {
                 </p>
               </div>
             ) : (
-              <div className={isCompact ? "" : "space-y-2.5"}>
+              <div className="space-y-2.5">
                 {history.map((entry) => {
                   const isEditing = editingId === entry.id;
                   // Draft = Web Speech + browser translate; Final = Whisper + configured translate.
@@ -2409,7 +2376,7 @@ export default function App() {
                   return (
                     <motion.div
                       key={entry.id}
-                      initial={{ opacity: 0, y: isCompact ? -5 : -10 }}
+                      initial={{ opacity: 0, y: -10 }}
                       animate={{ opacity: 1, y: 0 }}
                       onClick={() => {
                         setHighlightedSegId(entry.id);
@@ -2417,115 +2384,8 @@ export default function App() {
                         el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                         setTimeout(() => setHighlightedSegId(null), 2500);
                       }}
-                      className={cn(
-                        "group/entry transition-all cursor-pointer",
-                        isCompact
-                          ? "p-2 grid grid-cols-1 md:grid-cols-12 gap-3 items-start border-b border-zinc-100 hover:bg-zinc-50/70"
-                          : "grid grid-cols-1 md:grid-cols-2 gap-3 border border-zinc-100 p-2.5 md:p-3 rounded-xl hover:bg-zinc-50/50 hover:border-zinc-200 shadow-sm"
-                      )}
+                      className="group/entry transition-all cursor-pointer grid grid-cols-1 md:grid-cols-2 gap-3 border border-zinc-100 p-2.5 md:p-3 rounded-xl hover:bg-zinc-50/50 hover:border-zinc-200 shadow-sm"
                     >
-                      {isCompact ? (
-                        <>
-                          {/* Left-hand column: Metadata (Time + Quick Action button) */}
-                          <div className="md:col-span-1.5 flex md:flex-col items-center md:items-start justify-between md:justify-start gap-1 text-[10px] text-zinc-400 font-mono h-full pt-0.5 shrink-0 select-none">
-                            <span className="font-semibold text-zinc-400/80">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
-                            {entry.deviceLabel && (
-                              <span className={cn(
-                                "text-[9px] font-bold px-1.5 py-0.5 rounded-md whitespace-nowrap",
-                                entry.deviceId === deviceIdRef.current ? "bg-indigo-50 text-indigo-600" : "bg-emerald-50 text-emerald-600"
-                              )}>{entry.deviceLabel}</span>
-                            )}
-                            <div className="flex md:flex-row gap-1 items-center md:mt-1 opacity-40 group-hover/entry:opacity-100 transition-opacity">
-                              {!isEditing && (
-                                <button
-                                  onClick={() => {
-                                    setEditingId(entry.id);
-                                    setEditingText(entry.original);
-                                  }}
-                                  className="text-zinc-400 hover:text-indigo-600 p-0.5 rounded hover:bg-zinc-100/80 transition-colors"
-                                  title="修正英文聽寫內容"
-                                >
-                                  <Edit className="w-3 h-3" />
-                                </button>
-                              )}
-                              {entry.translated && (
-                                <button 
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(entry.translated!);
-                                    addToast('複製成功！', 'success');
-                                  }}
-                                  className="text-zinc-400 hover:text-indigo-600 p-0.5 rounded hover:bg-zinc-100/80 transition-colors"
-                                  title="複製中文翻譯"
-                                >
-                                  <Copy className="w-3 h-3" />
-                                </button>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Middle column: English */}
-                          <div className="md:col-span-5.5 min-w-0">
-                            {isEditing ? (
-                              <div className="space-y-1.5">
-                                <textarea
-                                  value={editingText}
-                                  onChange={(e) => setEditingText(e.target.value)}
-                                  className="w-full min-h-[55px] p-2 bg-zinc-50 border border-zinc-205 rounded-lg text-xs outline-none focus:border-indigo-505 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 transition-all font-sans leading-relaxed"
-                                  placeholder="在此修訂英文內容..."
-                                />
-                                <div className="flex items-center gap-1.5">
-                                  <button
-                                    onClick={() => handleSaveSegmentEdit(entry.id)}
-                                    className="px-2 py-0.5 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[9px] rounded transition-all flex items-center gap-0.5"
-                                  >
-                                    <Check className="w-2.5 h-2.5" />
-                                    <span>儲存</span>
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      setEditingId(null);
-                                      setEditingText('');
-                                    }}
-                                    className="px-2 py-0.5 bg-zinc-105 hover:bg-zinc-200 text-zinc-650 font-bold text-[9px] rounded transition-all"
-                                  >
-                                    取消
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              <p className="text-zinc-750 text-[13px] leading-relaxed font-normal">
-                                {dispOriginal || <span className="text-zinc-300 italic text-xs">Whisper 處理中…</span>}
-                              </p>
-                            )}
-                          </div>
-
-                          {/* Right column: Chinese translation */}
-                          <div className="md:col-span-5 border-t border-dashed border-zinc-100 pt-1.5 md:pt-0 md:border-t-0 md:border-l md:pl-3.5 min-w-0 space-y-1">
-                            {dispTranslated ? (
-                              <div className="space-y-0.5">
-                                <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{dispTranslated}</p>
-                                {!showDraft && entry.translatedBy && <span className="text-[9px] text-zinc-400 font-medium select-none">{entry.translatedBy}</span>}
-                                {showDraft && <span className="text-[9px] text-blue-400 font-medium select-none">⚡ 即時瀏覽器翻譯</span>}
-                              </div>
-                            ) : (
-                              <div className="flex items-center gap-1 text-indigo-400 font-medium py-0.5 select-none">
-                                <div className="flex gap-0.5">
-                                  <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
-                                  <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
-                                  <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce"></span>
-                                </div>
-                                <span className="text-[11px] italic">翻譯中...</span>
-                              </div>
-                            )}
-                            {canToggle && (
-                              <button onClick={toggleEntry} className="text-[9px] font-bold px-1.5 py-0.5 rounded-md border transition-colors select-none mt-0.5 block"
-                                style={showDraft ? { borderColor: '#bfdbfe', color: '#3b82f6', background: '#eff6ff' } : { borderColor: '#d1fae5', color: '#059669', background: '#f0fdf4' }}>
-                                {showDraft ? '⚡ 即時稿 → 切換精準版' : '🎯 精準版 → 切換即時稿'}
-                              </button>
-                            )}
-                          </div>
-                        </>
-                      ) : (
                         <>
                           {/* Comfortable: English card */}
                           <div className="space-y-1">
@@ -2635,7 +2495,6 @@ export default function App() {
                             )}
                           </div>
                         </>
-                      )}
                     </motion.div>
                   );
                 })}
