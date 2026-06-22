@@ -462,6 +462,8 @@ export default function App() {
 
   const whisperWorkerRef = useRef<Worker | null>(null);
   const whisperReadyRef = useRef(false);
+  const whisperDispatchQueueRef = useRef<Array<{ id: number; audio: Float32Array }>>([]);
+  const whisperJobActiveRef = useRef(false);
   const progressByFileRef = useRef<Record<string, { loaded: number; total: number }>>({});
   const vadRef = useRef<any>(null);
   const whisperJobRef = useRef(0);
@@ -475,6 +477,28 @@ export default function App() {
   const whisperJobEntryRef = useRef<Map<number, string>>(new Map());
   // Tracks how many chars of liveDraftTranscript were captured in the previous VAD utterance.
   const lastDraftLengthRef = useRef(0);
+  // Interim text already frozen into the current dual segment. When Web Speech
+  // later promotes the same text to final, advance the boundary so it is not
+  // repeated in the next VAD segment.
+  const consumedInterimRef = useRef('');
+
+  const dispatchNextWhisperJob = useCallback(() => {
+    if (whisperJobActiveRef.current || !whisperReadyRef.current || !whisperWorkerRef.current) return;
+    const next = whisperDispatchQueueRef.current.shift();
+    if (!next) return;
+    whisperJobActiveRef.current = true;
+    setWhisperActivity('transcribing');
+    whisperWorkerRef.current.postMessage(
+      { type: 'transcribe', id: next.id, audio: next.audio, language: 'english' },
+      [next.audio.buffer],
+    );
+  }, []);
+
+  const enqueueWhisperJob = useCallback((id: number, audio: Float32Array) => {
+    whisperDispatchQueueRef.current.push({ id, audio });
+    whisperPendingJobsRef.current += 1;
+    dispatchNextWhisperJob();
+  }, [dispatchNextWhisperJob]);
 
   // ===== Multi-device room sync =====
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -982,13 +1006,11 @@ export default function App() {
       try {
         const audio = base64Pcm16ToFloat32(clip.audio);
         const jobId = ++whisperJobRef.current;
-        whisperPendingJobsRef.current += 1;
-        setWhisperActivity('transcribing');
         clipJobsRef.current.set(jobId, {
           key, segmentId: clip.segmentId, mode: clip.mode,
           deviceId: clip.deviceId, deviceLabel: clip.deviceLabel, ts: clip.ts,
         });
-        whisperWorkerRef.current.postMessage({ type: 'transcribe', id: jobId, audio, language: 'english' }, [audio.buffer]);
+        enqueueWhisperJob(jobId, audio);
       } catch (e) { console.error('clip transcribe failed', e); }
     });
     const offLive = subscribeLiveTranscripts(id, setRoomLiveTranscripts);
@@ -1001,7 +1023,7 @@ export default function App() {
       window.history.replaceState({}, '', url.toString());
     } catch {}
     addToast(`已加入房間 ${id}`, 'success');
-  }, [addToast]);
+  }, [addToast, enqueueWhisperJob]);
 
   const createRoom = useCallback(() => {
     const code = makeRoomCode();
@@ -1041,12 +1063,14 @@ export default function App() {
         whisperReadyRef.current = true;
         setWhisperProgress(100);
         setWhisperState('ready');
+        dispatchNextWhisperJob();
         addToast('🎯 高精準模式就緒（Whisper 已載入）', 'success');
       } else if (msg.type === 'error') {
         whisperReadyRef.current = false;
         setWhisperState('error');
         addToast(`Whisper 載入失敗：${msg.error || '未知錯誤'}`, 'error');
       } else if (msg.type === 'result') {
+        whisperJobActiveRef.current = false;
         whisperPendingJobsRef.current = Math.max(0, whisperPendingJobsRef.current - 1);
         if (isActualRecordingRef.current) {
           setWhisperActivity(whisperPendingJobsRef.current > 0 ? 'transcribing' : 'listening');
@@ -1095,11 +1119,12 @@ export default function App() {
             translateFinalSegment(cleaned, fallbackId);
           }
         }
+        dispatchNextWhisperJob();
       }
     };
     whisperWorkerRef.current = worker;
     return worker;
-  }, [addToast, translateFinalSegment]);
+  }, [addToast, dispatchNextWhisperJob, translateFinalSegment]);
 
   const loadedModelRef = useRef('');
   const loadWhisperModel = useCallback(() => {
@@ -1161,21 +1186,26 @@ export default function App() {
     }
     const id = ++whisperJobRef.current;
     whisperJobEntryRef.current.set(id, entryId);
-    whisperPendingJobsRef.current += 1;
-    setWhisperActivity('transcribing');
-    whisperWorkerRef.current?.postMessage({ type: 'transcribe', id, audio, language: 'english' }, [audio.buffer]);
-  }, []);
+    enqueueWhisperJob(id, audio);
+  }, [enqueueWhisperJob]);
 
   // VAD is the single segmentation source for all three recognition modes.
   const handleUtterance = useCallback((audio: Float32Array) => {
     if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25) return;
     // Web Speech commonly emits its final result just after the VAD callback.
-    // A short delay keeps the card boundary aligned to the captured audio.
+    // Wait briefly, then freeze final + interim as the immutable dual draft.
     setTimeout(() => {
       const mode = recognitionModeRef.current;
       const fullDraft = liveDraftTranscriptRef.current;
-      const draft = fullDraft.slice(lastDraftLengthRef.current).trim();
+      const finalDraft = fullDraft.slice(lastDraftLengthRef.current).trim();
+      const interimDraft = lastInterimRef.current.trim();
+      const draft = `${finalDraft}${finalDraft && interimDraft ? ' ' : ''}${interimDraft}`.trim();
       lastDraftLengthRef.current = fullDraft.length;
+      if (interimDraft) {
+        consumedInterimRef.current = interimDraft;
+        lastInterimRef.current = '';
+        setInterimTranscript('');
+      }
 
       if (roomIdRef.current && isFirebaseConfigured()) {
         if (mode === 'live') {
@@ -1186,7 +1216,7 @@ export default function App() {
 
         let segmentId: string | null;
         if (mode === 'dual') {
-          segmentId = commitWebSpeechSegment(draft, 'dual');
+          segmentId = commitWebSpeechSegment(draft || '（此段未取得即時辨識文字）', 'dual');
         } else {
           segmentId = pushSegment(roomIdRef.current, {
             original: '',
@@ -1217,12 +1247,13 @@ export default function App() {
       if (mode === 'live') {
         commitWebSpeechSegment(draft, 'live');
       } else if (mode === 'dual') {
-        const entryId = commitWebSpeechSegment(draft, 'dual');
-        transcribeLocal(audio, draft || undefined, entryId || undefined);
+        const immutableDraft = draft || '（此段未取得即時辨識文字）';
+        const entryId = commitWebSpeechSegment(immutableDraft, 'dual');
+        transcribeLocal(audio, immutableDraft, entryId || undefined);
       } else {
         transcribeLocal(audio);
       }
-    }, 180);
+    }, 320);
   }, [commitWebSpeechSegment, transcribeLocal]);
 
   const stopWhisperRecording = useCallback(() => {
@@ -1343,6 +1374,12 @@ export default function App() {
           const next = `${liveDraftTranscriptRef.current} ${finalText}`.trim();
           liveDraftTranscriptRef.current = next;
           setLiveDraftTranscript(next);
+          const consumed = consumedInterimRef.current.trim().toLocaleLowerCase();
+          const finalized = finalText.trim().toLocaleLowerCase();
+          if (consumed && (finalized.includes(consumed) || consumed.includes(finalized))) {
+            lastDraftLengthRef.current = next.length;
+            consumedInterimRef.current = '';
+          }
         }
         // Remember the still-unfinalized tail so it survives an auto-restart.
         lastInterimRef.current = interimText;
@@ -1473,6 +1510,7 @@ export default function App() {
     setLiveDraftTranscript('');
     liveDraftTranscriptRef.current = '';
     lastDraftLengthRef.current = 0;
+    consumedInterimRef.current = '';
     lastInterimRef.current = '';
     setInterimTranscript('');
 
