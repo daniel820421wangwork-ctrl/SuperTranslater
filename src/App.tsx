@@ -1317,6 +1317,17 @@ export default function App() {
     lastInterimRef.current = '';
     setInterimTranscript('');
 
+    if (roomIdRef.current) {
+      // Room mode: VAD always runs regardless of recognitionMode.
+      // Clips (base64 PCM) are relayed to Firebase for the room's Whisper
+      // transcriber to process. Web Speech still runs for the live draft
+      // display on the left panel (unless the user picked whisper-only).
+      if (recognitionMode !== 'whisper') startLiveRecognition();
+      void startWhisperRecording();
+      return;
+    }
+
+    // Solo mode: respect the user's chosen recognition engine.
     if (recognitionMode === 'whisper') {
       void startWhisperRecording();
       return;
@@ -1325,11 +1336,9 @@ export default function App() {
       startLiveRecognition();
       return;
     }
-
-    // Dual track: Web Speech is only a low-latency draft. Whisper/VAD is the
-    // authoritative source that commits text to history and translation.
+    // Dual: Web Speech draft + Whisper for authoritative transcript/translation.
     startLiveRecognition();
-    if (!roomIdRef.current && !whisperReadyRef.current) {
+    if (!whisperReadyRef.current) {
       pendingDualWhisperStartRef.current = true;
       addToast('即時草稿已開始；Whisper 模型就緒後會自動加入正式轉錄。', 'info');
     } else {
@@ -1384,9 +1393,14 @@ export default function App() {
   const tryStartPending = useCallback(() => {
     const want = pendingStartRef.current;
     if (!want || isActualRecordingRef.current) return;
+    if (roomIdRef.current) {
+      // Room mode: VAD always runs — no need to wait for mode switch or model.
+      pendingStartRef.current = null;
+      startRecordingRef.current();
+      return;
+    }
     if (recognitionModeRef.current !== want) return;           // wait for the mode switch to apply
-    // Solo Whisper needs the model first; in a room we only capture/relay clips.
-    if ((want === 'whisper' || want === 'dual') && !roomIdRef.current && !whisperReadyRef.current) return;
+    if ((want === 'whisper' || want === 'dual') && !whisperReadyRef.current) return;
     pendingStartRef.current = null;
     startRecordingRef.current();
   }, []);

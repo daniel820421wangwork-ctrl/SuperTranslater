@@ -63,22 +63,31 @@ SuperTranslater/
 
 ---
 
-## 四、語音辨識三種模式
+## 四、語音辨識模式
 
-透過 `recognitionMode` state 切換，存在 `localStorage`。
+### 房間模式（Room Mode）— 固定架構，不受 recognitionMode 影響
 
-### `live`（即時模式）
-- 使用 Web Speech API
-- 低延遲，邊說邊出文字
-- 翻譯的也是這個 transcript
+```
+收音裝置（任何裝置）
+  └─ VAD 永遠啟動（Silero VAD）
+       └─ onSpeechEnd → base64 PCM → Firebase RTDB clips/{key}
+  └─ Web Speech（可選，依 recognitionMode）
+       └─ 左側 live draft 顯示用，不做翻譯
 
-### `dual`（雙軌模式，預設）
-- Web Speech API 產生「左側草稿」（`liveDraftTranscript`）—— 給使用者即時看，不送翻譯
-- Whisper 產生「正式稿」—— 送翻譯、存檔，用於右側 timeline
+房主（activeTranscriber：最小 ID 且 Whisper 已載入的成員）
+  └─ subscribeClips → decode base64 → Whisper（依房主本機設定）
+       └─ transcript → translate → pushSegment to Firebase
+```
 
-### `whisper`（高精準模式）
-- 只用 Silero VAD + Whisper，沒有 Web Speech
-- 延遲最高（VAD pause 700ms + Whisper WASM 2–10s）但辨識最準，口音強也能辨識
+### 單機模式（Solo Mode）— `recognitionMode` 決定使用哪個引擎
+
+| 模式 | 說明 |
+|------|------|
+| `live` | 只用 Web Speech API，低延遲，邊說邊出文字，直接送翻譯 |
+| `dual`（預設）| Web Speech 產生左側草稿（不翻譯）+ Whisper 正式稿（翻譯存檔）|
+| `whisper` | 只用 Silero VAD + Whisper，延遲高（2–10s）但最準確 |
+
+> `recognitionMode` 只影響單機模式。房間收音一律走 VAD → clips → 房主 Whisper。
 
 ---
 
