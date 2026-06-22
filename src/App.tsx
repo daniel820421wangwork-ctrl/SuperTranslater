@@ -80,6 +80,42 @@ const detectDeviceLabel = (): string =>
   /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ? '📱 手機' : '💻 電腦';
 const makeRoomCode = (): string => Math.random().toString(36).slice(2, 7).toUpperCase();
 
+const openGoogleTranslate = (text: string) => {
+  const url = `https://translate.google.com/?sl=auto&tl=zh-TW&text=${encodeURIComponent(text)}&op=translate`;
+  const popup = window.open(url, 'translate', 'width=700,height=900');
+  popup?.focus();
+};
+
+const ClickableTranscript = ({ text }: { text: string }) => {
+  const wordPattern = /\p{L}+(?:['’\-]\p{L}+)*/gu;
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+
+  for (const match of text.matchAll(wordPattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) parts.push(text.slice(cursor, index));
+    const word = match[0];
+    parts.push(
+      <button
+        key={`${index}-${word}`}
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          openGoogleTranslate(word);
+        }}
+        className="inline rounded px-0.5 -mx-0.5 hover:bg-sky-100 hover:text-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 cursor-pointer transition-colors"
+        title={`用 Google 翻譯查詢「${word}」`}
+      >
+        {word}
+      </button>,
+    );
+    cursor = index + word.length;
+  }
+
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return <>{parts}</>;
+};
+
 // Language configuration
 const LANGUAGES = [
   { code: 'en', label: '不指定口音', flag: '🌐' },
@@ -887,18 +923,18 @@ export default function App() {
   // for Whisper to replace the authoritative transcript and translation.
   const commitWebSpeechSegment = useCallback((text: string, mode: 'live' | 'dual'): string | null => {
     const clean = text.trim();
-    if (!clean) return null;
+    if (!clean && mode === 'live') return null;
     if (roomIdRef.current && isFirebaseConfigured()) {
       const segmentId = pushSegment(roomIdRef.current, {
         original: clean,
         translated: mode === 'dual' ? '等待翻譯' : null,
-        draftOriginal: mode === 'dual' ? clean : undefined,
+        draftOriginal: mode === 'dual' && clean ? clean : undefined,
         draftTranslated: mode === 'dual' ? '等待翻譯' : undefined,
         mode,
         status: mode === 'dual' ? 'whisper-processing' : 'translating',
         deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current, ts: Date.now(),
       });
-      if (segmentId && mode === 'dual') {
+      if (segmentId && mode === 'dual' && clean) {
         browserTranslate(clean)
           .then(t => updateSegment(roomIdRef.current!, segmentId, { draftTranslated: t, translated: t }))
           .catch(() => updateSegment(roomIdRef.current!, segmentId, { draftTranslated: '等待翻譯', translated: '等待翻譯' }));
@@ -911,10 +947,10 @@ export default function App() {
         deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current,
         mode, status: mode === 'dual' ? 'whisper-processing' : 'translating',
         hasFinal: false, showingDraft: false,
-        draftOriginal: mode === 'dual' ? clean : undefined,
+        draftOriginal: mode === 'dual' && clean ? clean : undefined,
         draftTranslated: mode === 'dual' ? '等待翻譯' : undefined,
       }, ...prev]);
-      if (mode === 'dual') {
+      if (mode === 'dual' && clean) {
         browserTranslate(clean)
           .then(t => setHistory(prev => prev.map(h => h.id === segmentId ? {
             ...h, draftTranslated: t, translated: t,
@@ -1181,16 +1217,41 @@ export default function App() {
     enqueueWhisperJob(id, audio);
   }, [enqueueWhisperJob]);
 
+  const waitForCurrentSpeechDraft = useCallback(async (): Promise<string> => {
+    const deadline = Date.now() + 1600;
+    let previous = '';
+    let stableSince = 0;
+
+    while (Date.now() < deadline) {
+      const finalText = currentSegmentFinalTextRef.current.trim();
+      const interimText = lastInterimRef.current.trim();
+      const candidate = `${finalText}${finalText && interimText ? ' ' : ''}${interimText}`.trim();
+
+      if (candidate) {
+        if (candidate === previous) {
+          if (Date.now() - stableSince >= 220) return candidate;
+        } else {
+          previous = candidate;
+          stableSince = Date.now();
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 80));
+    }
+
+    const finalText = currentSegmentFinalTextRef.current.trim();
+    const interimText = lastInterimRef.current.trim();
+    return `${finalText}${finalText && interimText ? ' ' : ''}${interimText}`.trim();
+  }, []);
+
   // VAD is the single segmentation source for all three recognition modes.
-  const handleUtterance = useCallback((audio: Float32Array) => {
+  const handleUtterance = useCallback(async (audio: Float32Array) => {
     if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25) return;
-    // Web Speech commonly emits its final result just after the VAD callback.
-    // Wait briefly, then freeze final + interim as the immutable dual draft.
-    setTimeout(() => {
-      const mode = recognitionModeRef.current;
-      const finalDraft = currentSegmentFinalTextRef.current.trim();
-      const interimDraft = lastInterimRef.current.trim();
-      const draft = `${finalDraft}${finalDraft && interimDraft ? ' ' : ''}${interimDraft}`.trim();
+    const mode = recognitionModeRef.current;
+    // Web Speech often returns final/interim after VAD has already ended the
+    // utterance. Wait until the draft is briefly stable instead of assuming a
+    // fixed 320ms response time.
+    const draft = mode === 'whisper' ? '' : await waitForCurrentSpeechDraft();
+    const interimDraft = lastInterimRef.current.trim();
       currentSegmentFinalTextRef.current = '';
       setCurrentSegmentFinalText('');
       if (interimDraft) {
@@ -1208,7 +1269,7 @@ export default function App() {
 
         let segmentId: string | null;
         if (mode === 'dual') {
-          segmentId = commitWebSpeechSegment(draft || '（此段未取得即時辨識文字）', 'dual');
+          segmentId = commitWebSpeechSegment(draft, 'dual');
         } else {
           segmentId = pushSegment(roomIdRef.current, {
             original: '',
@@ -1239,14 +1300,12 @@ export default function App() {
       if (mode === 'live') {
         commitWebSpeechSegment(draft, 'live');
       } else if (mode === 'dual') {
-        const immutableDraft = draft || '（此段未取得即時辨識文字）';
-        const entryId = commitWebSpeechSegment(immutableDraft, 'dual');
-        transcribeLocal(audio, immutableDraft, entryId || undefined);
+        const entryId = commitWebSpeechSegment(draft, 'dual');
+        transcribeLocal(audio, draft || undefined, entryId || undefined);
       } else {
         transcribeLocal(audio);
       }
-    }, 320);
-  }, [commitWebSpeechSegment, transcribeLocal]);
+  }, [commitWebSpeechSegment, transcribeLocal, waitForCurrentSpeechDraft]);
 
   const stopWhisperRecording = useCallback(() => {
     whisperRecordingActiveRef.current = false;
@@ -2193,6 +2252,7 @@ export default function App() {
                     }
                     const displayText = h.draftOriginal || h.original;
                     if (!displayText) {
+                      if (h.mode === 'dual') return null;
                       if (h.hasFinal) return null;
                       return (
                         <div key={h.id} data-seg-id={h.id} className="px-1 -mx-1 py-1 space-y-2">
@@ -2216,7 +2276,7 @@ export default function App() {
                         <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">
                           {h.deviceLabel || deviceLabelRef.current}：
                         </span>
-                        {displayText}
+                        <ClickableTranscript text={displayText} />
                       </p>
                     );
                   })}
@@ -2228,16 +2288,16 @@ export default function App() {
                         <span className="text-[10px] font-bold text-blue-300 mr-1.5 align-middle not-italic">
                           {lt.label || '裝置'}：
                         </span>
-                        {lt.text}
+                        <ClickableTranscript text={lt.text} />
                       </p>
                     ))
                   }
                   {recognitionMode !== 'whisper' && (currentSegmentFinalText || interimTranscript) && (
                     <p style={{ fontSize: transFontPx }} className="leading-relaxed text-indigo-500 italic">
                       <span className="text-[10px] font-bold text-indigo-300 mr-1.5 not-italic">{deviceLabelRef.current}：</span>
-                      {currentSegmentFinalText}
-                      {currentSegmentFinalText && interimTranscript ? ' ' : ''}
-                      {interimTranscript}
+                      <ClickableTranscript
+                        text={`${currentSegmentFinalText}${currentSegmentFinalText && interimTranscript ? ' ' : ''}${interimTranscript}`}
+                      />
                     </p>
                   )}
                 </>
@@ -2435,9 +2495,9 @@ export default function App() {
                   {currentSegmentFinalText || interimTranscript ? (
                     <span className="text-zinc-900 font-semibold not-italic">
                       <span className="text-[10px] text-zinc-400 mr-1.5">{deviceLabelRef.current}：</span>
-                      {currentSegmentFinalText}
-                      {currentSegmentFinalText && interimTranscript ? ' ' : ''}
-                      {interimTranscript}
+                      <ClickableTranscript
+                        text={`${currentSegmentFinalText}${currentSegmentFinalText && interimTranscript ? ' ' : ''}${interimTranscript}`}
+                      />
                     </span>
                   ) : (
                     <span className="text-zinc-400 animate-pulse">請開始講話，即時轉錄文字會顯示在此處...</span>
@@ -2482,6 +2542,7 @@ export default function App() {
                 }
                 const displayText = h.draftOriginal || h.original;
                 if (!displayText) {
+                  if (h.mode === 'dual') return null;
                   if (h.hasFinal) return null;
                   return (
                     <div key={h.id} data-seg-id={h.id} className="px-2 py-1 space-y-2">
@@ -2505,7 +2566,7 @@ export default function App() {
                     <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">
                       {h.deviceLabel || deviceLabelRef.current}：
                     </span>
-                    {displayText}
+                    <ClickableTranscript text={displayText} />
                   </p>
                 );
               })}
