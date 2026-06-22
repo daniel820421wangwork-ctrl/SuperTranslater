@@ -60,6 +60,12 @@ import { MicVAD } from '@ricky0123/vad-web';
 type TranslateMode = 'ai' | 'browser';
 type RecognitionMode = 'dual' | 'live' | 'whisper';
 type SegmentStatus = 'initial-ready' | 'whisper-processing' | 'translating' | 'completed' | 'failed';
+type SpeechDraftCapture = {
+  id: number;
+  finalText: string;
+  interimText: string;
+  updatedAt: number;
+};
 type VisibleBlocks = {
   voiceControls: boolean;
   timeline: boolean;
@@ -395,6 +401,12 @@ export default function App() {
   const liveDraftTranscriptRef = useRef('');
   const [currentSegmentFinalText, setCurrentSegmentFinalText] = useState('');
   const currentSegmentFinalTextRef = useRef('');
+  const speechDraftIdRef = useRef(0);
+  const activeSpeechDraftRef = useRef<SpeechDraftCapture>({
+    id: 0, finalText: '', interimText: '', updatedAt: 0,
+  });
+  const pendingSpeechDraftRef = useRef<SpeechDraftCapture | null>(null);
+  const vadSpeechActiveRef = useRef(false);
   const liveRecognitionActiveRef = useRef(false);
   const whisperRecordingActiveRef = useRef(false);
   const pendingDualWhisperStartRef = useRef(false);
@@ -513,10 +525,6 @@ export default function App() {
   }>>(new Map());
   // Maps solo Whisper jobId → pre-created history entry id so the result updates the right row.
   const whisperJobEntryRef = useRef<Map<number, string>>(new Map());
-  // Interim text already frozen into the current dual segment. When Web Speech
-  // later promotes the same text to final, do not add it to the next segment.
-  const consumedInterimRef = useRef('');
-
   const dispatchNextWhisperJob = useCallback(() => {
     if (whisperJobActiveRef.current || !whisperReadyRef.current || !whisperWorkerRef.current) return;
     const next = whisperDispatchQueueRef.current.shift();
@@ -1217,14 +1225,14 @@ export default function App() {
     enqueueWhisperJob(id, audio);
   }, [enqueueWhisperJob]);
 
-  const waitForCurrentSpeechDraft = useCallback(async (): Promise<string> => {
+  const waitForSpeechDraft = useCallback(async (capture: SpeechDraftCapture): Promise<string> => {
     const deadline = Date.now() + 1600;
     let previous = '';
     let stableSince = 0;
 
     while (Date.now() < deadline) {
-      const finalText = currentSegmentFinalTextRef.current.trim();
-      const interimText = lastInterimRef.current.trim();
+      const finalText = capture.finalText.trim();
+      const interimText = capture.interimText.trim();
       const candidate = `${finalText}${finalText && interimText ? ' ' : ''}${interimText}`.trim();
 
       if (candidate) {
@@ -1238,8 +1246,8 @@ export default function App() {
       await new Promise(resolve => setTimeout(resolve, 80));
     }
 
-    const finalText = currentSegmentFinalTextRef.current.trim();
-    const interimText = lastInterimRef.current.trim();
+    const finalText = capture.finalText.trim();
+    const interimText = capture.interimText.trim();
     return `${finalText}${finalText && interimText ? ' ' : ''}${interimText}`.trim();
   }, []);
 
@@ -1247,18 +1255,19 @@ export default function App() {
   const handleUtterance = useCallback(async (audio: Float32Array) => {
     if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25) return;
     const mode = recognitionModeRef.current;
-    // Web Speech often returns final/interim after VAD has already ended the
-    // utterance. Wait until the draft is briefly stable instead of assuming a
-    // fixed 320ms response time.
-    const draft = mode === 'whisper' ? '' : await waitForCurrentSpeechDraft();
-    const interimDraft = lastInterimRef.current.trim();
-      currentSegmentFinalTextRef.current = '';
-      setCurrentSegmentFinalText('');
-      if (interimDraft) {
-        consumedInterimRef.current = interimDraft;
-        lastInterimRef.current = '';
-        setInterimTranscript('');
-      }
+    const capture = activeSpeechDraftRef.current;
+    vadSpeechActiveRef.current = false;
+    pendingSpeechDraftRef.current = capture;
+    // Late Web Speech results can still update this detached capture, but a
+    // subsequent VAD speech start receives a fresh object and cannot mutate it.
+    const draft = mode === 'whisper' ? '' : await waitForSpeechDraft(capture);
+    if (pendingSpeechDraftRef.current?.id === capture.id) {
+      pendingSpeechDraftRef.current = null;
+    }
+    currentSegmentFinalTextRef.current = '';
+    setCurrentSegmentFinalText('');
+    lastInterimRef.current = '';
+    setInterimTranscript('');
 
       if (roomIdRef.current && isFirebaseConfigured()) {
         if (mode === 'live') {
@@ -1305,7 +1314,7 @@ export default function App() {
       } else {
         transcribeLocal(audio);
       }
-  }, [commitWebSpeechSegment, transcribeLocal, waitForCurrentSpeechDraft]);
+  }, [commitWebSpeechSegment, transcribeLocal, waitForSpeechDraft]);
 
   const stopWhisperRecording = useCallback(() => {
     whisperRecordingActiveRef.current = false;
@@ -1371,7 +1380,21 @@ export default function App() {
           noiseSuppression: true,
           autoGainControl: true,
         } as any,
-        onSpeechStart: () => setWhisperActivity('speech'),
+        onSpeechStart: () => {
+          const capture: SpeechDraftCapture = {
+            id: ++speechDraftIdRef.current,
+            finalText: '',
+            interimText: '',
+            updatedAt: Date.now(),
+          };
+          activeSpeechDraftRef.current = capture;
+          vadSpeechActiveRef.current = true;
+          currentSegmentFinalTextRef.current = '';
+          setCurrentSegmentFinalText('');
+          lastInterimRef.current = '';
+          setInterimTranscript('');
+          setWhisperActivity('speech');
+        },
         onSpeechRealStart: () => setWhisperActivity('speech'),
         onVADMisfire: () => setWhisperActivity('listening'),
         onSpeechEnd: (audio: Float32Array) => { handleUtterance(audio); },
@@ -1425,19 +1448,36 @@ export default function App() {
           const next = `${liveDraftTranscriptRef.current} ${finalText}`.trim();
           liveDraftTranscriptRef.current = next;
           setLiveDraftTranscript(next);
-          const consumed = consumedInterimRef.current.trim().toLocaleLowerCase();
-          const finalized = finalText.trim().toLocaleLowerCase();
-          if (consumed && (finalized.includes(consumed) || consumed.includes(finalized))) {
-            consumedInterimRef.current = '';
-          } else {
-            const segmentNext = `${currentSegmentFinalTextRef.current} ${finalText}`.trim();
-            currentSegmentFinalTextRef.current = segmentNext;
-            setCurrentSegmentFinalText(segmentNext);
-          }
         }
-        // Remember the still-unfinalized tail so it survives an auto-restart.
-        lastInterimRef.current = interimText;
-        setInterimTranscript(interimText);
+
+        const pending = pendingSpeechDraftRef.current;
+        const normalizedFinal = finalText.trim().toLocaleLowerCase();
+        const normalizedPendingInterim = pending?.interimText.trim().toLocaleLowerCase() || '';
+        const finalBelongsToPending = !!(
+          pending
+          && normalizedFinal
+          && normalizedPendingInterim
+          && (
+            normalizedFinal.includes(normalizedPendingInterim)
+            || normalizedPendingInterim.includes(normalizedFinal)
+          )
+        );
+        const target = finalBelongsToPending
+          ? pending!
+          : vadSpeechActiveRef.current
+            ? activeSpeechDraftRef.current
+            : (pending || activeSpeechDraftRef.current);
+
+        if (finalText) target.finalText = `${target.finalText} ${finalText}`.trim();
+        target.interimText = interimText;
+        target.updatedAt = Date.now();
+
+        if (target.id === activeSpeechDraftRef.current.id) {
+          currentSegmentFinalTextRef.current = target.finalText;
+          setCurrentSegmentFinalText(target.finalText);
+          lastInterimRef.current = target.interimText;
+          setInterimTranscript(target.interimText);
+        }
       };
 
       recognition.onerror = (event: any) => {
@@ -1476,9 +1516,16 @@ export default function App() {
           const next = `${liveDraftTranscriptRef.current} ${clean}`.trim();
           liveDraftTranscriptRef.current = next;
           setLiveDraftTranscript(next);
-          const segmentNext = `${currentSegmentFinalTextRef.current} ${clean}`.trim();
-          currentSegmentFinalTextRef.current = segmentNext;
-          setCurrentSegmentFinalText(segmentNext);
+          const target = vadSpeechActiveRef.current
+            ? activeSpeechDraftRef.current
+            : (pendingSpeechDraftRef.current || activeSpeechDraftRef.current);
+          target.finalText = `${target.finalText} ${clean}`.trim();
+          target.interimText = '';
+          target.updatedAt = Date.now();
+          if (target.id === activeSpeechDraftRef.current.id) {
+            currentSegmentFinalTextRef.current = target.finalText;
+            setCurrentSegmentFinalText(target.finalText);
+          }
           lastInterimRef.current = '';
         }
         // The API often ends on its own after a pause or ~60s. If the user still
@@ -1568,7 +1615,14 @@ export default function App() {
     liveDraftTranscriptRef.current = '';
     setCurrentSegmentFinalText('');
     currentSegmentFinalTextRef.current = '';
-    consumedInterimRef.current = '';
+    activeSpeechDraftRef.current = {
+      id: ++speechDraftIdRef.current,
+      finalText: '',
+      interimText: '',
+      updatedAt: Date.now(),
+    };
+    pendingSpeechDraftRef.current = null;
+    vadSpeechActiveRef.current = false;
     lastInterimRef.current = '';
     setInterimTranscript('');
 
@@ -1957,6 +2011,14 @@ export default function App() {
     liveDraftTranscriptRef.current = '';
     setCurrentSegmentFinalText('');
     currentSegmentFinalTextRef.current = '';
+    activeSpeechDraftRef.current = {
+      id: ++speechDraftIdRef.current,
+      finalText: '',
+      interimText: '',
+      updatedAt: Date.now(),
+    };
+    pendingSpeechDraftRef.current = null;
+    vadSpeechActiveRef.current = false;
     setInterimTranscript('');
     // In a room, clearing wipes the shared transcript for everyone.
     if (roomIdRef.current && isFirebaseConfigured()) {
