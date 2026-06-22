@@ -122,6 +122,42 @@ const ClickableTranscript = ({ text }: { text: string }) => {
   return <>{parts}</>;
 };
 
+const normalizeSpeechToken = (token: string): string =>
+  token.toLocaleLowerCase().replace(/[^\p{L}\p{N}'’\-]/gu, '');
+
+// Chrome Web Speech may return a cumulative hypothesis for the next VAD
+// utterance. Remove only a sufficiently long overlap between the previously
+// committed transcript tail and the new candidate prefix.
+const removeCommittedDraftOverlap = (committed: string, candidate: string): string => {
+  const previousWords = committed.trim().split(/\s+/).filter(Boolean);
+  const candidateWords = candidate.trim().split(/\s+/).filter(Boolean);
+  if (!previousWords.length || !candidateWords.length) return candidate.trim();
+
+  const maxOverlap = Math.min(previousWords.length, candidateWords.length, 160);
+  let overlap = 0;
+  for (let size = maxOverlap; size >= 1; size--) {
+    let matches = true;
+    for (let index = 0; index < size; index++) {
+      if (
+        normalizeSpeechToken(previousWords[previousWords.length - size + index])
+        !== normalizeSpeechToken(candidateWords[index])
+      ) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) {
+      overlap = size;
+      break;
+    }
+  }
+
+  // Three matching words is strong evidence of a cumulative result. Also
+  // suppress an exact two-word duplicate without eating normal short speech.
+  const shouldStrip = overlap >= 3 || (overlap === candidateWords.length && overlap >= 2);
+  return shouldStrip ? candidateWords.slice(overlap).join(' ').trim() : candidate.trim();
+};
+
 // Language configuration
 const LANGUAGES = [
   { code: 'en', label: '不指定口音', flag: '🌐' },
@@ -407,6 +443,8 @@ export default function App() {
   });
   const pendingSpeechDraftRef = useRef<SpeechDraftCapture | null>(null);
   const vadSpeechActiveRef = useRef(false);
+  const utteranceProcessingQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lastBrowserDraftSnapshotRef = useRef('');
   const liveRecognitionActiveRef = useRef(false);
   const whisperRecordingActiveRef = useRef(false);
   const pendingDualWhisperStartRef = useRef(false);
@@ -1251,16 +1289,49 @@ export default function App() {
     return `${finalText}${finalText && interimText ? ' ' : ''}${interimText}`.trim();
   }, []);
 
+  const getIncrementalBrowserDraft = useCallback((rawDraft: string): string => {
+    const current = rawDraft.replace(/\s+/g, ' ').trim();
+    if (!current) return '';
+
+    const previous = lastBrowserDraftSnapshotRef.current;
+    lastBrowserDraftSnapshotRef.current = current;
+    if (!previous) return current;
+
+    const currentLower = current.toLocaleLowerCase();
+    const previousLower = previous.toLocaleLowerCase();
+    if (currentLower === previousLower) return '';
+    if (currentLower.startsWith(previousLower)) {
+      return current.slice(previous.length).trim();
+    }
+
+    // Chrome may revise one or two words in an otherwise cumulative result.
+    // Remove a large common prefix, but keep genuinely new standalone speech.
+    const currentWords = current.split(' ');
+    const previousWords = previous.split(' ');
+    let commonPrefix = 0;
+    while (
+      commonPrefix < currentWords.length
+      && commonPrefix < previousWords.length
+      && currentWords[commonPrefix].toLocaleLowerCase() === previousWords[commonPrefix].toLocaleLowerCase()
+    ) {
+      commonPrefix += 1;
+    }
+    if (commonPrefix >= 3 && commonPrefix / previousWords.length >= 0.6) {
+      return currentWords.slice(commonPrefix).join(' ').trim();
+    }
+    return current;
+  }, []);
+
   // VAD is the single segmentation source for all three recognition modes.
-  const handleUtterance = useCallback(async (audio: Float32Array) => {
+  const handleUtterance = useCallback(async (audio: Float32Array, capture: SpeechDraftCapture) => {
     if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25) return;
     const mode = recognitionModeRef.current;
-    const capture = activeSpeechDraftRef.current;
     vadSpeechActiveRef.current = false;
     pendingSpeechDraftRef.current = capture;
     // Late Web Speech results can still update this detached capture, but a
     // subsequent VAD speech start receives a fresh object and cannot mutate it.
-    const draft = mode === 'whisper' ? '' : await waitForSpeechDraft(capture);
+    const rawDraft = mode === 'whisper' ? '' : await waitForSpeechDraft(capture);
+    const draft = mode === 'whisper' ? '' : getIncrementalBrowserDraft(rawDraft);
     if (pendingSpeechDraftRef.current?.id === capture.id) {
       pendingSpeechDraftRef.current = null;
     }
@@ -1314,7 +1385,7 @@ export default function App() {
       } else {
         transcribeLocal(audio);
       }
-  }, [commitWebSpeechSegment, transcribeLocal, waitForSpeechDraft]);
+  }, [commitWebSpeechSegment, getIncrementalBrowserDraft, transcribeLocal, waitForSpeechDraft]);
 
   const stopWhisperRecording = useCallback(() => {
     whisperRecordingActiveRef.current = false;
@@ -1397,7 +1468,12 @@ export default function App() {
         },
         onSpeechRealStart: () => setWhisperActivity('speech'),
         onVADMisfire: () => setWhisperActivity('listening'),
-        onSpeechEnd: (audio: Float32Array) => { handleUtterance(audio); },
+        onSpeechEnd: (audio: Float32Array) => {
+          const capture = activeSpeechDraftRef.current;
+          utteranceProcessingQueueRef.current = utteranceProcessingQueueRef.current
+            .then(() => handleUtterance(audio, capture))
+            .catch((error) => console.error('utterance processing failed', error));
+        },
       } as any);
       vadRef.current = vad;
       await vad.start();
@@ -1623,6 +1699,8 @@ export default function App() {
     };
     pendingSpeechDraftRef.current = null;
     vadSpeechActiveRef.current = false;
+    utteranceProcessingQueueRef.current = Promise.resolve();
+    lastBrowserDraftSnapshotRef.current = '';
     lastInterimRef.current = '';
     setInterimTranscript('');
 
@@ -2019,6 +2097,8 @@ export default function App() {
     };
     pendingSpeechDraftRef.current = null;
     vadSpeechActiveRef.current = false;
+    utteranceProcessingQueueRef.current = Promise.resolve();
+    lastBrowserDraftSnapshotRef.current = '';
     setInterimTranscript('');
     // In a room, clearing wipes the shared transcript for everyone.
     if (roomIdRef.current && isFirebaseConfigured()) {
