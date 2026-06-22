@@ -1990,16 +1990,14 @@ export default function App() {
               )}
             </div>
             <div ref={liveScrollRef} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 space-y-2">
-              {(recognitionMode === 'dual' ? !liveDraftTranscript && !interimTranscript : history.length === 0 && !interimTranscript) ? (
+              {history.length === 0 && !interimTranscript ? (
                 <p className="text-sm text-zinc-300 mt-8 text-center select-none">開始講話，逐字稿會在此連續顯示…</p>
               ) : (
                 <>
-                  {recognitionMode === 'dual' ? (
-                    liveDraftTranscript && (
-                      <p style={{ fontSize: transFontPx }} className="leading-relaxed text-zinc-700">{liveDraftTranscript}</p>
-                    )
-                  ) : (
-                    [...history].reverse().map(h => (
+                  {[...history].reverse().map(h => {
+                    const displayText = h.draftOriginal || h.original;
+                    if (!displayText) return null;
+                    return (
                       <p
                         key={h.id}
                         data-seg-id={h.id}
@@ -2012,10 +2010,10 @@ export default function App() {
                         )}
                       >
                         {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}</span>}
-                        {h.original}
+                        {displayText}
                       </p>
-                    ))
-                  )}
+                    );
+                  })}
                   {/* Live interim text from other recording devices in the room */}
                   {Object.entries(roomLiveTranscripts)
                     .filter(([id, lt]) => id !== deviceIdRef.current && lt.text)
@@ -2252,22 +2250,26 @@ export default function App() {
           {/* Transcript history — always visible for cross-panel highlight */}
           {history.length > 0 && (
             <div ref={liveScrollRef} className="overflow-y-auto max-h-[35vh] space-y-1 -mx-1">
-              {[...history].reverse().map(h => (
-                <p
-                  key={h.id}
-                  data-seg-id={h.id}
-                  style={{ fontSize: transFontPx }}
-                  className={cn(
-                    "leading-relaxed px-2 py-0.5 rounded-lg transition-colors duration-300 cursor-default",
-                    highlightedSegId === h.id
-                      ? "text-indigo-700 bg-indigo-50 ring-1 ring-indigo-200"
-                      : "text-zinc-500"
-                  )}
-                >
-                  {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}</span>}
-                  {h.original}
-                </p>
-              ))}
+              {[...history].reverse().map(h => {
+                const displayText = h.draftOriginal || h.original;
+                if (!displayText) return null;
+                return (
+                  <p
+                    key={h.id}
+                    data-seg-id={h.id}
+                    style={{ fontSize: transFontPx }}
+                    className={cn(
+                      "leading-relaxed px-2 py-0.5 rounded-lg transition-colors duration-300 cursor-default",
+                      highlightedSegId === h.id
+                        ? "text-indigo-700 bg-indigo-50 ring-1 ring-indigo-200"
+                        : "text-zinc-500"
+                    )}
+                  >
+                    {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}</span>}
+                    {displayText}
+                  </p>
+                );
+              })}
             </div>
           )}
 
