@@ -1880,14 +1880,14 @@ export default function App() {
             "border-b lg:border-b-0 border-zinc-200/80 bg-zinc-50/60 flex flex-col z-10",
             !visibleBlocks.timeline && "flex-1 min-w-0",
             someoneRecording && visibleBlocks.voiceControls
-              ? "p-3 sm:p-4 overflow-hidden min-h-[55vh] lg:min-h-0"
+              ? "p-3 sm:p-4 overflow-hidden"
               : "p-3 sm:p-5 lg:p-6 gap-4 lg:gap-5 overflow-visible lg:overflow-y-auto"
           )}
         >
 
         {someoneRecording && visibleBlocks.voiceControls ? (
           /* ===== Continuous full transcript (recording) ===== */
-          <div className="flex flex-col h-full min-h-0">
+          <div className="flex flex-col min-h-0 h-[45vh] lg:h-full">
             {/* pr-24 on mobile keeps the stop button clear of the top-right floating header */}
             <div className="flex items-center justify-between mb-3 flex-none pr-24 sm:pr-0">
               <div className="flex items-center gap-2 min-w-0">
@@ -2169,6 +2169,28 @@ export default function App() {
           </>
           )}
 
+          {/* Transcript history — always visible for cross-panel highlight */}
+          {history.length > 0 && (
+            <div ref={liveScrollRef} className="overflow-y-auto max-h-[35vh] space-y-1 -mx-1">
+              {[...history].reverse().map(h => (
+                <p
+                  key={h.id}
+                  data-seg-id={h.id}
+                  style={{ fontSize: transFontPx }}
+                  className={cn(
+                    "leading-relaxed px-2 py-0.5 rounded-lg transition-colors duration-300 cursor-default",
+                    highlightedSegId === h.id
+                      ? "text-indigo-700 bg-indigo-50 ring-1 ring-indigo-200"
+                      : "text-zinc-500"
+                  )}
+                >
+                  {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}</span>}
+                  {h.original}
+                </p>
+              ))}
+            </div>
+          )}
+
           {/* Browser Speech Compatibility Tips */}
           {speechErrorDetected && (
             <div className="bg-amber-50/80 border border-amber-200/60 p-4 rounded-3xl text-[11px] text-amber-800 leading-relaxed shadow-sm">
@@ -2301,7 +2323,8 @@ export default function App() {
                       onClick={() => {
                         setHighlightedSegId(entry.id);
                         const el = document.querySelector(`[data-seg-id="${entry.id}"]`);
-                        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                        setTimeout(() => setHighlightedSegId(null), 2500);
                       }}
                       className={cn(
                         "group/entry transition-all cursor-pointer",
