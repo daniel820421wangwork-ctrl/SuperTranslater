@@ -59,6 +59,7 @@ import { MicVAD } from '@ricky0123/vad-web';
 
 type TranslateMode = 'ai' | 'browser';
 type RecognitionMode = 'dual' | 'live' | 'whisper';
+type SegmentStatus = 'initial-ready' | 'whisper-processing' | 'translating' | 'completed' | 'failed';
 type VisibleBlocks = {
   voiceControls: boolean;
   timeline: boolean;
@@ -336,6 +337,8 @@ export default function App() {
   const [history, setHistory] = useState<{
     id: string; original: string; translated?: string; timestamp: number;
     deviceLabel?: string; deviceId?: string; translatedBy?: string;
+    mode?: RecognitionMode;
+    status?: SegmentStatus;
     draftOriginal?: string;    // Immediate Web Speech text (dual mode) or undefined
     draftTranslated?: string;  // Browser-translate of draftOriginal
     hasFinal: boolean;         // true once Whisper + configured translate are done
@@ -464,13 +467,14 @@ export default function App() {
   const whisperJobRef = useRef(0);
   // Jobs where this device transcribes someone else's relayed clip:
   // jobId -> the clip's key + originating device, so the result is attributed right.
-  const clipJobsRef = useRef<Map<number, { key: string; deviceId: string; deviceLabel: string; ts: number }>>(new Map());
+  const clipJobsRef = useRef<Map<number, {
+    key: string; segmentId: string; mode: 'dual' | 'whisper';
+    deviceId: string; deviceLabel: string; ts: number;
+  }>>(new Map());
   // Maps solo Whisper jobId → pre-created history entry id so the result updates the right row.
   const whisperJobEntryRef = useRef<Map<number, string>>(new Map());
   // Tracks how many chars of liveDraftTranscript were captured in the previous VAD utterance.
   const lastDraftLengthRef = useRef(0);
-  // In dual mode, the most recent Web-Speech-created entry ID waiting for Whisper.
-  const dualPendingEntryRef = useRef<string | null>(null);
 
   // ===== Multi-device room sync =====
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -829,45 +833,75 @@ export default function App() {
   const effectiveTranslateModeRef = useRef(effectiveTranslateMode);
   useEffect(() => { effectiveTranslateModeRef.current = effectiveTranslateMode; });
 
-  // Push a finished transcript chunk into the timeline and translate it.
-  // Shared by both the Web Speech and Whisper engines. In a multi-device room
-  // the segment is published to Firebase (and rendered via the room listener);
-  // solo, it goes straight into local state.
-  const commitSegment = useCallback((text: string) => {
+  const translateFinalSegment = useCallback((text: string, segmentId: string) => {
+    const mode = effectiveTranslateModeRef.current;
+    setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, status: 'translating' } : h));
+    if (mode === 'browser') {
+      browserTranslate(text)
+        .then(t => setHistory(prev => prev.map(h => h.id === segmentId ? {
+          ...h, translated: t, translatedBy: transLabelFor('browser', null),
+          status: 'completed', hasFinal: true,
+        } : h)))
+        .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? {
+          ...h, translated: '等待翻譯', status: 'failed', hasFinal: true,
+        } : h)));
+      return;
+    }
+    const label = transLabelFor('ai', keyInfoRef.current);
+    Promise.resolve(translateSegmentRef.current(text, segmentId))
+      .then(() => setHistory(prev => prev.map(h => h.id === segmentId ? {
+        ...h, translatedBy: label, status: 'completed', hasFinal: true,
+      } : h)))
+      .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? {
+        ...h, status: 'failed', hasFinal: true,
+      } : h)));
+  }, []);
+
+  // Commit a VAD-delimited Web Speech segment. Live translates once with the
+  // configured provider. Dual first shows a browser translation, then waits
+  // for Whisper to replace the authoritative transcript and translation.
+  const commitWebSpeechSegment = useCallback((text: string, mode: 'live' | 'dual'): string | null => {
     const clean = text.trim();
-    if (!clean) return;
+    if (!clean) return null;
     if (roomIdRef.current && isFirebaseConfigured()) {
-      // Publish the raw segment; whichever device in the room holds an API key
-      // (the active translator) picks it up and fills in the translation.
-      pushSegment(roomIdRef.current, {
-        original: clean, translated: null,
+      const segmentId = pushSegment(roomIdRef.current, {
+        original: clean,
+        translated: mode === 'dual' ? '等待翻譯' : null,
+        draftOriginal: mode === 'dual' ? clean : undefined,
+        draftTranslated: mode === 'dual' ? '等待翻譯' : undefined,
+        mode,
+        status: mode === 'dual' ? 'whisper-processing' : 'translating',
         deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current, ts: Date.now(),
       });
+      if (segmentId && mode === 'dual') {
+        browserTranslate(clean)
+          .then(t => updateSegment(roomIdRef.current!, segmentId, { draftTranslated: t, translated: t }))
+          .catch(() => updateSegment(roomIdRef.current!, segmentId, { draftTranslated: '等待翻譯', translated: '等待翻譯' }));
+      }
+      return segmentId;
     } else {
       const segmentId = Math.random().toString(36).substring(7);
-      // Create entry immediately with draft fields; hasFinal becomes true once configured translate arrives.
       setHistory(prev => [{
         id: segmentId, original: clean, timestamp: Date.now(),
-        hasFinal: false, showingDraft: false,
-        draftOriginal: clean, draftTranslated: undefined,
+        mode, status: mode === 'dual' ? 'whisper-processing' : 'translating',
+        hasFinal: mode === 'live' ? false : false, showingDraft: false,
+        draftOriginal: mode === 'dual' ? clean : undefined,
+        draftTranslated: mode === 'dual' ? '等待翻譯' : undefined,
       }, ...prev]);
-      // Browser-translate immediately as the draft (fast preview).
-      browserTranslate(clean)
-        .then(t => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, draftTranslated: t } : h)))
-        .catch(() => {});
-      const mode = effectiveTranslateModeRef.current;
-      if (mode === 'browser') {
+      if (mode === 'dual') {
         browserTranslate(clean)
-          .then(t => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translated: t, translatedBy: transLabelFor('browser', null), hasFinal: true } : h)))
-          .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translated: '[翻譯失敗，此瀏覽器不支援內建翻譯]', hasFinal: true } : h)));
+          .then(t => setHistory(prev => prev.map(h => h.id === segmentId ? {
+            ...h, draftTranslated: t, translated: t,
+          } : h)))
+          .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? {
+            ...h, draftTranslated: '等待翻譯', translated: '等待翻譯',
+          } : h)));
       } else {
-        const label = transLabelFor('ai', keyInfoRef.current);
-        Promise.resolve(translateSegmentRef.current(clean, segmentId))
-          .then(() => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, translatedBy: label, hasFinal: true } : h)))
-          .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? { ...h, hasFinal: true } : h)));
+        translateFinalSegment(clean, segmentId);
       }
+      return segmentId;
     }
-  }, []);
+  }, [translateFinalSegment]);
 
   // ===== Multi-device room join / leave =====
   const leaveRoom = useCallback(() => {
@@ -911,12 +945,30 @@ export default function App() {
           id: key, original: seg.original,
           translated: seg.translated ?? undefined, timestamp: seg.ts,
           deviceLabel: seg.deviceLabel, deviceId: seg.deviceId, translatedBy: seg.translatedBy,
-          hasFinal: !!seg.translated, showingDraft: false,
+          mode: seg.mode, status: seg.status,
+          draftOriginal: seg.draftOriginal,
+          draftTranslated: seg.draftTranslated ?? undefined,
+          hasFinal: seg.status
+            ? seg.status === 'completed' || seg.status === 'failed'
+            : !!seg.translated,
+          showingDraft: false,
         }];
         next.sort((a, b) => b.timestamp - a.timestamp);
         return next;
       }),
-      (key, seg) => setHistory(prev => prev.map(h => h.id === key ? { ...h, translated: seg.translated ?? h.translated, translatedBy: seg.translatedBy ?? h.translatedBy, hasFinal: h.hasFinal || !!seg.translated } : h)),
+      (key, seg) => setHistory(prev => prev.map(h => h.id === key ? {
+        ...h,
+        original: seg.original ?? h.original,
+        translated: seg.translated === null ? undefined : (seg.translated ?? h.translated),
+        translatedBy: seg.translatedBy ?? h.translatedBy,
+        draftOriginal: seg.draftOriginal ?? h.draftOriginal,
+        draftTranslated: seg.draftTranslated ?? h.draftTranslated,
+        mode: seg.mode ?? h.mode,
+        status: seg.status ?? h.status,
+        hasFinal: seg.status
+          ? seg.status === 'completed' || seg.status === 'failed'
+          : h.hasFinal || !!seg.translated,
+      } : h)),
     );
     const offMembers = subscribeMembers(id, setRoomMembers);
     const offConn = subscribeConnection(setRoomConnected);
@@ -932,7 +984,10 @@ export default function App() {
         const jobId = ++whisperJobRef.current;
         whisperPendingJobsRef.current += 1;
         setWhisperActivity('transcribing');
-        clipJobsRef.current.set(jobId, { key, deviceId: clip.deviceId, deviceLabel: clip.deviceLabel, ts: clip.ts });
+        clipJobsRef.current.set(jobId, {
+          key, segmentId: clip.segmentId, mode: clip.mode,
+          deviceId: clip.deviceId, deviceLabel: clip.deviceLabel, ts: clip.ts,
+        });
         whisperWorkerRef.current.postMessage({ type: 'transcribe', id: jobId, audio, language: 'english' }, [audio.buffer]);
       } catch (e) { console.error('clip transcribe failed', e); }
     });
@@ -1005,13 +1060,17 @@ export default function App() {
         const cleaned = cleanTranscript(msg.text || '');
         const job = clipJobsRef.current.get(msg.id);
         if (job) {
-          // This was someone else's relayed clip: attribute the text to them,
-          // publish it as a room segment, then remove the clip.
           clipJobsRef.current.delete(msg.id);
           if (cleaned && !isJunkTranscript(cleaned) && roomIdRef.current) {
-            pushSegment(roomIdRef.current, {
-              original: cleaned, translated: null,
-              deviceId: job.deviceId, deviceLabel: job.deviceLabel, ts: job.ts,
+            updateSegment(roomIdRef.current, job.segmentId, {
+              original: cleaned,
+              translated: null,
+              status: 'translating',
+            });
+          } else if (roomIdRef.current) {
+            updateSegment(roomIdRef.current, job.segmentId, {
+              status: 'failed',
+              translated: '[Whisper 無法辨識此段音訊]',
             });
           }
           if (roomIdRef.current) deleteClip(roomIdRef.current, job.key);
@@ -1022,27 +1081,25 @@ export default function App() {
           if (!cleaned || isJunkTranscript(cleaned)) {
             if (entryId) setHistory(prev => prev.filter(h => h.id !== entryId));
           } else if (entryId) {
-            setHistory(prev => prev.map(h => h.id === entryId ? { ...h, original: cleaned } : h));
-            const mode = effectiveTranslateModeRef.current;
-            if (mode === 'browser') {
-              browserTranslate(cleaned)
-                .then(t => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, translated: t, translatedBy: transLabelFor('browser', null), hasFinal: true } : h)))
-                .catch(() => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, translated: '[翻譯失敗]', hasFinal: true } : h)));
-            } else {
-              const label = transLabelFor('ai', keyInfoRef.current);
-              Promise.resolve(translateSegmentRef.current(cleaned, entryId))
-                .then(() => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, translatedBy: label, hasFinal: true } : h)))
-                .catch(() => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, hasFinal: true } : h)));
-            }
+            setHistory(prev => prev.map(h => h.id === entryId ? {
+              ...h, original: cleaned, status: 'translating',
+            } : h));
+            translateFinalSegment(cleaned, entryId);
           } else {
-            commitSegment(cleaned); // fallback: no pre-created entry
+            const fallbackId = Math.random().toString(36).substring(7);
+            setHistory(prev => [{
+              id: fallbackId, original: cleaned, timestamp: Date.now(),
+              mode: 'whisper', status: 'translating',
+              hasFinal: false, showingDraft: false,
+            }, ...prev]);
+            translateFinalSegment(cleaned, fallbackId);
           }
         }
       }
     };
     whisperWorkerRef.current = worker;
     return worker;
-  }, [addToast, commitSegment]);
+  }, [addToast, translateFinalSegment]);
 
   const loadedModelRef = useRef('');
   const loadWhisperModel = useCallback(() => {
@@ -1092,6 +1149,7 @@ export default function App() {
       entryId = Math.random().toString(36).substring(7);
       setHistory(prev => [{
         id: entryId, original: '', timestamp: Date.now(),
+        mode: 'whisper', status: 'whisper-processing',
         hasFinal: false, showingDraft: false,
         draftOriginal, draftTranslated: undefined,
       }, ...prev]);
@@ -1108,37 +1166,64 @@ export default function App() {
     whisperWorkerRef.current?.postMessage({ type: 'transcribe', id, audio, language: 'english' }, [audio.buffer]);
   }, []);
 
-  // One VAD-detected utterance: in a room, relay it as a clip for the room's
-  // transcriber to handle; solo, transcribe it locally.
+  // VAD is the single segmentation source for all three recognition modes.
   const handleUtterance = useCallback((audio: Float32Array) => {
     if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25) return;
-    if (roomIdRef.current && isFirebaseConfigured()) {
-      normalizeAudio(audio);
-      pushClip(roomIdRef.current, {
-        audio: float32ToBase64Pcm16(audio),
-        deviceId: deviceIdRef.current, deviceLabel: deviceLabelRef.current, ts: Date.now(),
-      });
-      setWhisperActivity('listening');
-    } else {
-      if (recognitionModeRef.current === 'dual') {
-        // Entry was already created by Web Speech final; just attach Whisper to it.
-        const existingId = dualPendingEntryRef.current ?? undefined;
-        dualPendingEntryRef.current = null;
-        lastDraftLengthRef.current = liveDraftTranscriptRef.current.length;
-        if (existingId) {
-          transcribeLocal(audio, undefined, existingId);
-        } else {
-          // No WS text for this window — fall back to creating a new entry.
-          const full = liveDraftTranscriptRef.current;
-          const delta = full.slice(lastDraftLengthRef.current).trim();
-          const withInterim = (delta + (delta && lastInterimRef.current ? ' ' : '') + lastInterimRef.current).trim();
-          transcribeLocal(audio, withInterim || undefined);
+    // Web Speech commonly emits its final result just after the VAD callback.
+    // A short delay keeps the card boundary aligned to the captured audio.
+    setTimeout(() => {
+      const mode = recognitionModeRef.current;
+      const fullDraft = liveDraftTranscriptRef.current;
+      const draft = fullDraft.slice(lastDraftLengthRef.current).trim();
+      lastDraftLengthRef.current = fullDraft.length;
+
+      if (roomIdRef.current && isFirebaseConfigured()) {
+        if (mode === 'live') {
+          commitWebSpeechSegment(draft, 'live');
+          setWhisperActivity('listening');
+          return;
         }
+
+        let segmentId: string | null;
+        if (mode === 'dual') {
+          segmentId = commitWebSpeechSegment(draft, 'dual');
+        } else {
+          segmentId = pushSegment(roomIdRef.current, {
+            original: '',
+            translated: null,
+            mode: 'whisper',
+            status: 'whisper-processing',
+            deviceId: deviceIdRef.current,
+            deviceLabel: deviceLabelRef.current,
+            ts: Date.now(),
+          });
+        }
+
+        if (segmentId) {
+          normalizeAudio(audio);
+          pushClip(roomIdRef.current, {
+            audio: float32ToBase64Pcm16(audio),
+            segmentId,
+            mode,
+            deviceId: deviceIdRef.current,
+            deviceLabel: deviceLabelRef.current,
+            ts: Date.now(),
+          });
+        }
+        setWhisperActivity('listening');
+        return;
+      }
+
+      if (mode === 'live') {
+        commitWebSpeechSegment(draft, 'live');
+      } else if (mode === 'dual') {
+        const entryId = commitWebSpeechSegment(draft, 'dual');
+        transcribeLocal(audio, draft || undefined, entryId || undefined);
       } else {
         transcribeLocal(audio);
       }
-    }
-  }, [transcribeLocal]);
+    }, 180);
+  }, [commitWebSpeechSegment, transcribeLocal]);
 
   const stopWhisperRecording = useCallback(() => {
     whisperRecordingActiveRef.current = false;
@@ -1176,7 +1261,7 @@ export default function App() {
   const startWhisperRecording = useCallback(async () => {
     // In a room we only CAPTURE + relay clips (the transcriber needs the model,
     // not us). Solo, we transcribe locally, so the model must be ready first.
-    if (!roomIdRef.current && !whisperReadyRef.current) {
+    if (!roomIdRef.current && recognitionModeRef.current !== 'live' && !whisperReadyRef.current) {
       addToast('Whisper 尚未載入完成，請稍候片刻再開始。', 'info');
       return;
     }
@@ -1255,26 +1340,9 @@ export default function App() {
         }
 
         if (finalText) {
-          if (recognitionModeRef.current === 'dual') {
-            const next = `${liveDraftTranscriptRef.current} ${finalText}`.trim();
-            liveDraftTranscriptRef.current = next;
-            setLiveDraftTranscript(next);
-            // Immediately create an entry so both panels show text without waiting for VAD.
-            const clean = finalText.trim();
-            if (clean) {
-              const entryId = Math.random().toString(36).substring(7);
-              setHistory(prev => [{
-                id: entryId, original: clean, draftOriginal: clean,
-                timestamp: Date.now(), hasFinal: false, showingDraft: false, draftTranslated: undefined,
-              }, ...prev]);
-              browserTranslate(clean)
-                .then(t => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, draftTranslated: t } : h)))
-                .catch(() => {});
-              dualPendingEntryRef.current = entryId;
-            }
-          } else {
-            commitSegment(finalText);
-          }
+          const next = `${liveDraftTranscriptRef.current} ${finalText}`.trim();
+          liveDraftTranscriptRef.current = next;
+          setLiveDraftTranscript(next);
         }
         // Remember the still-unfinalized tail so it survives an auto-restart.
         lastInterimRef.current = interimText;
@@ -1310,28 +1378,13 @@ export default function App() {
       recognition.onend = () => {
         liveRecognitionActiveRef.current = false;
         setInterimTranscript('');
-        // If the session ended mid-sentence, the un-finalized tail would be lost
-        // — commit it so we don't drop those words.
+        // Preserve an unfinished tail in the left live transcript. VAD remains
+        // the only component allowed to create a history card.
         if (lastInterimRef.current.trim()) {
-          if (recognitionModeRef.current === 'dual') {
-            const clean = lastInterimRef.current.trim();
-            const next = `${liveDraftTranscriptRef.current} ${clean}`.trim();
-            liveDraftTranscriptRef.current = next;
-            setLiveDraftTranscript(next);
-            if (clean) {
-              const entryId = Math.random().toString(36).substring(7);
-              setHistory(prev => [{
-                id: entryId, original: clean, draftOriginal: clean,
-                timestamp: Date.now(), hasFinal: false, showingDraft: false, draftTranslated: undefined,
-              }, ...prev]);
-              browserTranslate(clean)
-                .then(t => setHistory(prev => prev.map(h => h.id === entryId ? { ...h, draftTranslated: t } : h)))
-                .catch(() => {});
-              dualPendingEntryRef.current = entryId;
-            }
-          } else {
-            commitSegment(lastInterimRef.current);
-          }
+          const clean = lastInterimRef.current.trim();
+          const next = `${liveDraftTranscriptRef.current} ${clean}`.trim();
+          liveDraftTranscriptRef.current = next;
+          setLiveDraftTranscript(next);
           lastInterimRef.current = '';
         }
         // The API often ends on its own after a pause or ~60s. If the user still
@@ -1420,7 +1473,6 @@ export default function App() {
     setLiveDraftTranscript('');
     liveDraftTranscriptRef.current = '';
     lastDraftLengthRef.current = 0;
-    dualPendingEntryRef.current = null;
     lastInterimRef.current = '';
     setInterimTranscript('');
 
@@ -1441,6 +1493,7 @@ export default function App() {
     }
     if (recognitionMode === 'live') {
       startLiveRecognition();
+      void startWhisperRecording();
       return;
     }
     // Dual: Web Speech draft + Whisper for authoritative transcript/translation.
@@ -1690,17 +1743,31 @@ export default function App() {
     const info = keyInfoRef.current;
     const mode = effectiveTranslateMode;
     for (const h of history) {
-      if ((h.translated === undefined || h.translated === null || h.translated === '') && !translatingKeysRef.current.has(h.id)) {
+      if (
+        h.status === 'translating'
+        && !!h.original.trim()
+        && (h.translated === undefined || h.translated === null || h.translated === '')
+        && !translatingKeysRef.current.has(h.id)
+      ) {
         translatingKeysRef.current.add(h.id);
         const segId = h.id;
         const job = mode === 'browser' ? browserTranslate(h.original)
           : (info ? translateWith(info, h.original) : Promise.reject(new Error('no key')));
         const src = transLabelFor(mode, mode === 'browser' ? null : info);
         job
-          .then((t) => { if (roomIdRef.current) updateSegment(roomIdRef.current, segId, { translated: t || '[翻譯失敗]', translatedBy: src }); })
+          .then((t) => {
+            if (roomIdRef.current) updateSegment(roomIdRef.current, segId, {
+              translated: t || '[翻譯失敗]',
+              translatedBy: src,
+              status: t ? 'completed' : 'failed',
+            });
+          })
           .catch((e) => {
             console.error('room translate failed', e);
-            if (roomIdRef.current) updateSegment(roomIdRef.current, segId, { translated: '[翻譯失敗，請檢查翻譯設定/金鑰]' });
+            if (roomIdRef.current) updateSegment(roomIdRef.current, segId, {
+              translated: '[翻譯失敗，請檢查翻譯設定/金鑰]',
+              status: 'failed',
+            });
           })
           .finally(() => translatingKeysRef.current.delete(segId));
       }
@@ -2036,6 +2103,15 @@ export default function App() {
               ) : (
                 <>
                   {[...history].reverse().map(h => {
+                    if (h.mode === 'whisper') {
+                      if (h.hasFinal) return null;
+                      return (
+                        <div key={h.id} data-seg-id={h.id} className="px-1 -mx-1 py-1 space-y-2">
+                          <div className="h-3 bg-zinc-200 rounded-full animate-pulse w-3/4" />
+                          <div className="h-3 bg-zinc-200 rounded-full animate-pulse w-1/2" />
+                        </div>
+                      );
+                    }
                     const displayText = h.draftOriginal || h.original;
                     if (!displayText) {
                       if (h.hasFinal) return null;
@@ -2058,7 +2134,7 @@ export default function App() {
                             : "text-zinc-700"
                         )}
                       >
-                        {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}</span>}
+                        {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}：</span>}
                         {displayText}
                       </p>
                     );
@@ -2068,13 +2144,18 @@ export default function App() {
                     .filter(([id, lt]) => id !== deviceIdRef.current && lt.text)
                     .map(([id, lt]) => (
                       <p key={id} style={{ fontSize: transFontPx }} className="leading-relaxed text-blue-500 italic">
-                        {lt.label && <span className="text-[10px] font-bold text-blue-300 mr-1.5 align-middle not-italic">{lt.label}</span>}
+                        {lt.label && <span className="text-[10px] font-bold text-blue-300 mr-1.5 align-middle not-italic">{lt.label}：</span>}
                         {lt.text}
                       </p>
                     ))
                   }
-                  {interimTranscript && (
-                    <p style={{ fontSize: transFontPx }} className="leading-relaxed text-indigo-500 italic">{interimTranscript}</p>
+                  {recognitionMode !== 'whisper' && (liveDraftTranscript.slice(lastDraftLengthRef.current).trim() || interimTranscript) && (
+                    <p style={{ fontSize: transFontPx }} className="leading-relaxed text-indigo-500 italic">
+                      <span className="text-[10px] font-bold text-indigo-300 mr-1.5 not-italic">{deviceLabelRef.current}：</span>
+                      {liveDraftTranscript.slice(lastDraftLengthRef.current).trim()}
+                      {liveDraftTranscript.slice(lastDraftLengthRef.current).trim() && interimTranscript ? ' ' : ''}
+                      {interimTranscript}
+                    </p>
                   )}
                 </>
               )}
@@ -2270,6 +2351,7 @@ export default function App() {
                 <div className="text-xs text-zinc-800 leading-relaxed font-sans italic break-words min-h-[24px]">
                   {liveDraftTranscript || interimTranscript ? (
                     <span className="text-zinc-900 font-semibold not-italic">
+                      <span className="text-[10px] text-zinc-400 mr-1.5">{deviceLabelRef.current}：</span>
                       {liveDraftTranscript}{liveDraftTranscript && interimTranscript ? ' ' : ''}{interimTranscript}
                     </span>
                   ) : (
@@ -2300,6 +2382,15 @@ export default function App() {
           {history.length > 0 && (
             <div ref={liveScrollRef} className="overflow-y-auto max-h-[35vh] space-y-1 -mx-1">
               {[...history].reverse().map(h => {
+                if (h.mode === 'whisper') {
+                  if (h.hasFinal) return null;
+                  return (
+                    <div key={h.id} data-seg-id={h.id} className="px-2 py-1 space-y-2">
+                      <div className="h-3 bg-zinc-200 rounded-full animate-pulse w-3/4" />
+                      <div className="h-3 bg-zinc-200 rounded-full animate-pulse w-1/2" />
+                    </div>
+                  );
+                }
                 const displayText = h.draftOriginal || h.original;
                 if (!displayText) {
                   if (h.hasFinal) return null;
@@ -2322,7 +2413,7 @@ export default function App() {
                         : "text-zinc-500"
                     )}
                   >
-                    {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}</span>}
+                    {h.deviceLabel && <span className="text-[10px] font-bold text-zinc-400 mr-1.5 align-middle">{h.deviceLabel}：</span>}
                     {displayText}
                   </p>
                 );
@@ -2422,9 +2513,7 @@ export default function App() {
                 {history.map((entry) => {
                   const isEditing = editingId === entry.id;
                   const isProcessing = !entry.hasFinal;
-                  const hasDraftComparison = entry.hasFinal && !!entry.draftOriginal && (
-                    entry.draftOriginal !== entry.original || entry.draftTranslated !== entry.translated
-                  );
+                  const hasDraftComparison = entry.hasFinal && !!entry.draftOriginal;
                   const mainOriginal = entry.original || entry.draftOriginal || '';
                   const mainTranslated = entry.translated ?? (isProcessing ? entry.draftTranslated : undefined);
                   const toggleComparison = (e: React.MouseEvent) => {
@@ -2471,7 +2560,11 @@ export default function App() {
                           {isProcessing ? (
                             <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 flex items-center gap-1 select-none">
                               <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse inline-block" />
-                              Whisper 處理中
+                              {entry.status === 'translating'
+                                ? '翻譯處理中'
+                                : entry.mode === 'live'
+                                  ? '翻譯處理中'
+                                  : 'Whisper 處理中'}
                             </span>
                           ) : hasDraftComparison ? (
                             <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 select-none">
@@ -2547,7 +2640,9 @@ export default function App() {
                                 <span className="text-[9px] text-zinc-400 font-medium select-none">{entry.translatedBy}</span>
                               )}
                               {isProcessing && (
-                                <span className="text-[9px] text-amber-500 font-medium select-none">⚡ 瀏覽器翻譯（等待 Whisper）</span>
+                                <span className="text-[9px] text-amber-500 font-medium select-none">
+                                  {entry.mode === 'dual' ? '⚡ 初步翻譯（等待 Whisper）' : '依設定翻譯中'}
+                                </span>
                               )}
                             </div>
                           ) : (
@@ -2557,7 +2652,9 @@ export default function App() {
                                 <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
                                 <span className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></span>
                               </div>
-                              <span className="text-[11.5px] italic">{isProcessing ? 'Whisper 處理中...' : '翻譯中...'}</span>
+                              <span className="text-[11.5px] italic">
+                                {entry.status === 'translating' || entry.mode === 'live' ? '翻譯中...' : 'Whisper 處理中...'}
+                              </span>
                             </div>
                           )}
                         </div>

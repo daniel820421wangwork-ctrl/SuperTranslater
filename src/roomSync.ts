@@ -10,9 +10,15 @@ import {
 export type LiveTranscript = { text: string; label: string; ts: number };
 import { loadFirebaseConfig } from './firebaseConfig';
 
+export type SegmentStatus = 'initial-ready' | 'whisper-processing' | 'translating' | 'completed' | 'failed';
+
 export type RoomSegment = {
   original: string;
   translated: string | null;
+  draftOriginal?: string;
+  draftTranslated?: string | null;
+  mode?: 'dual' | 'live' | 'whisper';
+  status?: SegmentStatus;
   deviceId: string;
   deviceLabel: string;
   ts: number;
@@ -141,7 +147,14 @@ export const subscribeMembers = (
 };
 
 // ----- Audio clip relay (capturer uploads short clips; transcriber consumes) -----
-export type RoomClip = { audio: string; deviceId: string; deviceLabel: string; ts: number };
+export type RoomClip = {
+  audio: string;
+  deviceId: string;
+  deviceLabel: string;
+  ts: number;
+  segmentId: string;
+  mode: 'dual' | 'whisper';
+};
 
 export const pushClip = (roomId: string, clip: RoomClip): void => {
   const d = getDb();
