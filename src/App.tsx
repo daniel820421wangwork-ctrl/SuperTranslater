@@ -1996,7 +1996,15 @@ export default function App() {
                 <>
                   {[...history].reverse().map(h => {
                     const displayText = h.draftOriginal || h.original;
-                    if (!displayText) return null;
+                    if (!displayText) {
+                      if (h.hasFinal) return null;
+                      return (
+                        <div key={h.id} data-seg-id={h.id} className="px-1 -mx-1 py-1 space-y-2">
+                          <div className="h-3 bg-zinc-200 rounded-full animate-pulse w-3/4" />
+                          <div className="h-3 bg-zinc-200 rounded-full animate-pulse w-1/2" />
+                        </div>
+                      );
+                    }
                     return (
                       <p
                         key={h.id}
@@ -2252,7 +2260,15 @@ export default function App() {
             <div ref={liveScrollRef} className="overflow-y-auto max-h-[35vh] space-y-1 -mx-1">
               {[...history].reverse().map(h => {
                 const displayText = h.draftOriginal || h.original;
-                if (!displayText) return null;
+                if (!displayText) {
+                  if (h.hasFinal) return null;
+                  return (
+                    <div key={h.id} data-seg-id={h.id} className="px-2 py-1 space-y-2">
+                      <div className="h-3 bg-zinc-200 rounded-full animate-pulse w-3/4" />
+                      <div className="h-3 bg-zinc-200 rounded-full animate-pulse w-1/2" />
+                    </div>
+                  );
+                }
                 return (
                   <p
                     key={h.id}
