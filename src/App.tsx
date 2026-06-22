@@ -357,6 +357,8 @@ export default function App() {
   const [interimTranscript, setInterimTranscript] = useState('');
   const [liveDraftTranscript, setLiveDraftTranscript] = useState('');
   const liveDraftTranscriptRef = useRef('');
+  const [currentSegmentFinalText, setCurrentSegmentFinalText] = useState('');
+  const currentSegmentFinalTextRef = useRef('');
   const liveRecognitionActiveRef = useRef(false);
   const whisperRecordingActiveRef = useRef(false);
   const pendingDualWhisperStartRef = useRef(false);
@@ -475,11 +477,8 @@ export default function App() {
   }>>(new Map());
   // Maps solo Whisper jobId → pre-created history entry id so the result updates the right row.
   const whisperJobEntryRef = useRef<Map<number, string>>(new Map());
-  // Tracks how many chars of liveDraftTranscript were captured in the previous VAD utterance.
-  const lastDraftLengthRef = useRef(0);
   // Interim text already frozen into the current dual segment. When Web Speech
-  // later promotes the same text to final, advance the boundary so it is not
-  // repeated in the next VAD segment.
+  // later promotes the same text to final, do not add it to the next segment.
   const consumedInterimRef = useRef('');
 
   const dispatchNextWhisperJob = useCallback(() => {
@@ -1189,11 +1188,11 @@ export default function App() {
     // Wait briefly, then freeze final + interim as the immutable dual draft.
     setTimeout(() => {
       const mode = recognitionModeRef.current;
-      const fullDraft = liveDraftTranscriptRef.current;
-      const finalDraft = fullDraft.slice(lastDraftLengthRef.current).trim();
+      const finalDraft = currentSegmentFinalTextRef.current.trim();
       const interimDraft = lastInterimRef.current.trim();
       const draft = `${finalDraft}${finalDraft && interimDraft ? ' ' : ''}${interimDraft}`.trim();
-      lastDraftLengthRef.current = fullDraft.length;
+      currentSegmentFinalTextRef.current = '';
+      setCurrentSegmentFinalText('');
       if (interimDraft) {
         consumedInterimRef.current = interimDraft;
         lastInterimRef.current = '';
@@ -1370,8 +1369,11 @@ export default function App() {
           const consumed = consumedInterimRef.current.trim().toLocaleLowerCase();
           const finalized = finalText.trim().toLocaleLowerCase();
           if (consumed && (finalized.includes(consumed) || consumed.includes(finalized))) {
-            lastDraftLengthRef.current = next.length;
             consumedInterimRef.current = '';
+          } else {
+            const segmentNext = `${currentSegmentFinalTextRef.current} ${finalText}`.trim();
+            currentSegmentFinalTextRef.current = segmentNext;
+            setCurrentSegmentFinalText(segmentNext);
           }
         }
         // Remember the still-unfinalized tail so it survives an auto-restart.
@@ -1415,6 +1417,9 @@ export default function App() {
           const next = `${liveDraftTranscriptRef.current} ${clean}`.trim();
           liveDraftTranscriptRef.current = next;
           setLiveDraftTranscript(next);
+          const segmentNext = `${currentSegmentFinalTextRef.current} ${clean}`.trim();
+          currentSegmentFinalTextRef.current = segmentNext;
+          setCurrentSegmentFinalText(segmentNext);
           lastInterimRef.current = '';
         }
         // The API often ends on its own after a pause or ~60s. If the user still
@@ -1502,7 +1507,8 @@ export default function App() {
     if (liveRecognitionActiveRef.current || whisperRecordingActiveRef.current) return;
     setLiveDraftTranscript('');
     liveDraftTranscriptRef.current = '';
-    lastDraftLengthRef.current = 0;
+    setCurrentSegmentFinalText('');
+    currentSegmentFinalTextRef.current = '';
     consumedInterimRef.current = '';
     lastInterimRef.current = '';
     setInterimTranscript('');
@@ -1890,6 +1896,8 @@ export default function App() {
     setError(null);
     setLiveDraftTranscript('');
     liveDraftTranscriptRef.current = '';
+    setCurrentSegmentFinalText('');
+    currentSegmentFinalTextRef.current = '';
     setInterimTranscript('');
     // In a room, clearing wipes the shared transcript for everyone.
     if (roomIdRef.current && isFirebaseConfigured()) {
@@ -2224,11 +2232,11 @@ export default function App() {
                       </p>
                     ))
                   }
-                  {recognitionMode !== 'whisper' && (liveDraftTranscript.slice(lastDraftLengthRef.current).trim() || interimTranscript) && (
+                  {recognitionMode !== 'whisper' && (currentSegmentFinalText || interimTranscript) && (
                     <p style={{ fontSize: transFontPx }} className="leading-relaxed text-indigo-500 italic">
                       <span className="text-[10px] font-bold text-indigo-300 mr-1.5 not-italic">{deviceLabelRef.current}：</span>
-                      {liveDraftTranscript.slice(lastDraftLengthRef.current).trim()}
-                      {liveDraftTranscript.slice(lastDraftLengthRef.current).trim() && interimTranscript ? ' ' : ''}
+                      {currentSegmentFinalText}
+                      {currentSegmentFinalText && interimTranscript ? ' ' : ''}
                       {interimTranscript}
                     </p>
                   )}
@@ -2412,7 +2420,7 @@ export default function App() {
 
             {/* Real-time Listening Transcript Section — only the live (Web Speech)
                 engine streams interim words; Whisper transcribes per utterance. */}
-            {(recognitionMode === 'live' || recognitionMode === 'dual') && (isRecording || interimTranscript || liveDraftTranscript) && (
+            {(recognitionMode === 'live' || recognitionMode === 'dual') && isRecording && (
               <div className="mt-3 p-3.5 bg-zinc-50 border border-zinc-200/60 rounded-2xl space-y-2 animate-fade-in">
                 <div className="flex items-center gap-2">
                   <span className="flex h-2 w-2 relative">
@@ -2424,10 +2432,12 @@ export default function App() {
                   </span>
                 </div>
                 <div className="text-xs text-zinc-800 leading-relaxed font-sans italic break-words min-h-[24px]">
-                  {liveDraftTranscript || interimTranscript ? (
+                  {currentSegmentFinalText || interimTranscript ? (
                     <span className="text-zinc-900 font-semibold not-italic">
                       <span className="text-[10px] text-zinc-400 mr-1.5">{deviceLabelRef.current}：</span>
-                      {liveDraftTranscript}{liveDraftTranscript && interimTranscript ? ' ' : ''}{interimTranscript}
+                      {currentSegmentFinalText}
+                      {currentSegmentFinalText && interimTranscript ? ' ' : ''}
+                      {interimTranscript}
                     </span>
                   ) : (
                     <span className="text-zinc-400 animate-pulse">請開始講話，即時轉錄文字會顯示在此處...</span>
