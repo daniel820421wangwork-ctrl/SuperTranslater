@@ -551,6 +551,7 @@ export default function App() {
 
   const whisperWorkerRef = useRef<Worker | null>(null);
   const whisperReadyRef = useRef(false);
+  const whisperLoadingRef = useRef(false);
   const whisperDispatchQueueRef = useRef<Array<{ id: number; audio: Float32Array }>>([]);
   const whisperJobActiveRef = useRef(false);
   const progressByFileRef = useRef<Record<string, { loaded: number; total: number }>>({});
@@ -1114,6 +1115,41 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const failPendingWhisperJobs = useCallback((reason: string) => {
+    const queued = [...whisperDispatchQueueRef.current];
+    whisperDispatchQueueRef.current = [];
+    whisperJobActiveRef.current = false;
+    whisperPendingJobsRef.current = 0;
+    setWhisperActivity(isActualRecordingRef.current ? 'listening' : 'idle');
+
+    for (const job of queued) {
+      const roomJob = clipJobsRef.current.get(job.id);
+      if (roomJob) {
+        clipJobsRef.current.delete(job.id);
+        if (roomIdRef.current) {
+          updateSegment(roomIdRef.current, roomJob.segmentId, {
+            status: 'failed',
+            translated: `[Whisper 載入失敗：${reason}]`,
+          });
+          deleteClip(roomIdRef.current, roomJob.key);
+        }
+        claimedRoomClipKeysRef.current.delete(roomJob.key);
+        continue;
+      }
+
+      const entryId = whisperJobEntryRef.current.get(job.id);
+      if (entryId) {
+        whisperJobEntryRef.current.delete(job.id);
+        setHistory(prev => prev.map(h => h.id === entryId ? {
+          ...h,
+          status: 'failed',
+          translated: `[Whisper 載入失敗：${reason}]`,
+          hasFinal: true,
+        } : h));
+      }
+    }
+  }, []);
+
   // ===== In-browser Whisper engine =====
   const ensureWhisperWorker = useCallback(() => {
     if (whisperWorkerRef.current) return whisperWorkerRef.current;
@@ -1132,15 +1168,19 @@ export default function App() {
           if (total > 0) setWhisperProgress(Math.min(99, Math.round((loaded / total) * 100)));
         }
       } else if (msg.type === 'ready') {
+        whisperLoadingRef.current = false;
         whisperReadyRef.current = true;
         setWhisperProgress(100);
         setWhisperState('ready');
         dispatchNextWhisperJob();
         addToast('🎯 高精準模式就緒（Whisper 已載入）', 'success');
       } else if (msg.type === 'error') {
+        whisperLoadingRef.current = false;
         whisperReadyRef.current = false;
         setWhisperState('error');
-        addToast(`Whisper 載入失敗：${msg.error || '未知錯誤'}`, 'error');
+        const reason = msg.error || '未知錯誤';
+        failPendingWhisperJobs(reason);
+        addToast(`Whisper 載入失敗：${reason}`, 'error');
       } else if (msg.type === 'result') {
         whisperJobActiveRef.current = false;
         whisperPendingJobsRef.current = Math.max(0, whisperPendingJobsRef.current - 1);
@@ -1175,7 +1215,14 @@ export default function App() {
           // Solo local transcription: update the pre-created entry (or remove it on junk).
           const entryId = whisperJobEntryRef.current.get(msg.id);
           whisperJobEntryRef.current.delete(msg.id);
-          if (!cleaned || isJunkTranscript(cleaned)) {
+          if (msg.error && entryId) {
+            setHistory(prev => prev.map(h => h.id === entryId ? {
+              ...h,
+              status: 'failed',
+              translated: `[Whisper 轉錄失敗：${msg.error}]`,
+              hasFinal: true,
+            } : h));
+          } else if (!cleaned || isJunkTranscript(cleaned)) {
             if (entryId) setHistory(prev => prev.filter(h => h.id !== entryId));
           } else if (entryId) {
             setHistory(prev => prev.map(h => h.id === entryId ? {
@@ -1198,16 +1245,19 @@ export default function App() {
     };
     whisperWorkerRef.current = worker;
     return worker;
-  }, [addToast, dispatchNextWhisperJob, translateFinalSegment]);
+  }, [addToast, dispatchNextWhisperJob, failPendingWhisperJobs, translateFinalSegment]);
 
   const loadedModelRef = useRef('');
   const loadWhisperModel = useCallback(() => {
     const model = whisperModelRef.current;
     if (whisperReadyRef.current && loadedModelRef.current === model) { setWhisperState('ready'); return; }
+    if (whisperLoadingRef.current && loadedModelRef.current === model) return;
     const worker = ensureWhisperWorker();
     progressByFileRef.current = {};
     setWhisperProgress(0);
     setWhisperState('loading');
+    whisperLoadingRef.current = true;
+    whisperReadyRef.current = false;
     loadedModelRef.current = model;
     const device = (navigator as any).gpu ? 'webgpu' : 'wasm';
     worker.postMessage({ type: 'load', model, device });
@@ -1218,6 +1268,7 @@ export default function App() {
   useEffect(() => {
     if (modelMountRef.current) { modelMountRef.current = false; return; }
     whisperReadyRef.current = false;
+    whisperLoadingRef.current = false;
     setWhisperState('idle');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whisperModel]);
@@ -1237,7 +1288,8 @@ export default function App() {
   // Solo path: transcribe this device's own utterance with local Whisper.
   // Creates a history entry immediately (with optional Web Speech draft) before queuing the job.
   const transcribeLocal = useCallback((audio: Float32Array, draftOriginal?: string, existingEntryId?: string) => {
-    if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25 || !whisperReadyRef.current) return;
+    if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25) return;
+    if (!whisperReadyRef.current && !whisperLoadingRef.current) loadWhisperModel();
     normalizeAudio(audio);
     let entryId: string;
     if (existingEntryId) {
@@ -1262,7 +1314,7 @@ export default function App() {
     const id = ++whisperJobRef.current;
     whisperJobEntryRef.current.set(id, entryId);
     enqueueWhisperJob(id, audio);
-  }, [enqueueWhisperJob]);
+  }, [enqueueWhisperJob, loadWhisperModel]);
 
   const waitForSpeechDraft = useCallback(async (capture: SpeechDraftCapture): Promise<string> => {
     const deadline = Date.now() + 1600;
@@ -1422,12 +1474,6 @@ export default function App() {
   };
 
   const startWhisperRecording = useCallback(async () => {
-    // In a room we only CAPTURE + relay clips (the transcriber needs the model,
-    // not us). Solo, we transcribe locally, so the model must be ready first.
-    if (!roomIdRef.current && recognitionModeRef.current !== 'live' && !whisperReadyRef.current) {
-      addToast('Whisper 尚未載入完成，請稍候片刻再開始。', 'info');
-      return;
-    }
     if (vadRef.current) return; // already running
     try {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
@@ -1688,6 +1734,9 @@ export default function App() {
 
   const startRecording = useCallback(() => {
     if (liveRecognitionActiveRef.current || whisperRecordingActiveRef.current) return;
+    if (recognitionMode !== 'live' && !IS_IOS && !whisperReadyRef.current && !whisperLoadingRef.current) {
+      loadWhisperModel();
+    }
     setLiveDraftTranscript('');
     liveDraftTranscriptRef.current = '';
     setCurrentSegmentFinalText('');
@@ -1730,10 +1779,9 @@ export default function App() {
     if (!whisperReadyRef.current) {
       pendingDualWhisperStartRef.current = true;
       addToast('即時草稿已開始；Whisper 模型就緒後會自動加入正式轉錄。', 'info');
-    } else {
-      void startWhisperRecording();
     }
-  }, [addToast, recognitionMode, startLiveRecognition, startWhisperRecording]);
+    void startWhisperRecording();
+  }, [addToast, loadWhisperModel, recognitionMode, startLiveRecognition, startWhisperRecording]);
 
   useEffect(() => {
     if (
@@ -1789,7 +1837,6 @@ export default function App() {
       return;
     }
     if (recognitionModeRef.current !== want) return;           // wait for the mode switch to apply
-    if ((want === 'whisper' || want === 'dual') && !whisperReadyRef.current) return;
     pendingStartRef.current = null;
     startRecordingRef.current();
   }, []);
@@ -2587,9 +2634,9 @@ export default function App() {
 
             {/* Action record toggle button */}
             {(() => {
-              // In a room we capture+relay (no local model needed); only solo
-              // Whisper must wait for the model before recording.
-              const whisperBusy = recognitionMode === 'whisper' && !roomId && !IS_IOS && whisperState !== 'ready';
+              // Whisper can now capture first and process queued audio after
+              // the model finishes loading, so the record button stays enabled.
+              const whisperBusy = false;
               return (
                 <button
                   onClick={toggleRecording}
