@@ -1642,22 +1642,27 @@ export default function App() {
       };
 
       recognition.onerror = (event: any) => {
+        const recoverableErrors = new Set(['aborted', 'network', 'no-speech', 'audio-capture']);
+        const fatalErrors = new Set(['not-allowed', 'service-not-allowed', 'language-not-supported']);
+
         if (event.error === 'aborted') {
           console.warn('Speech recognition aborted');
         } else {
           console.error('Speech recognition error', event.error);
         }
-        setSpeechErrorDetected(event.error);
-        if (event.error === 'not-allowed') {
-          addToast('未獲得麥克風權限，請檢查瀏覽器安全性設定，或直接在下方手動鍵盤輸入唷！');
-        } else if (event.error === 'network') {
-          addToast('網路連線不穩定/語音伺服器連線受限，語音辨識已中斷。推薦使用下方「手動鍵盤輸入門」進行完美比對與翻譯！');
-        } else if (event.error !== 'no-speech') {
-          addToast(`錄音發生錯誤：${event.error}。推薦使用下方手動鍵盤輸入唷！`);
+
+        if (fatalErrors.has(event.error)) {
+          setSpeechErrorDetected(event.error);
+        } else if (recoverableErrors.has(event.error)) {
+          setSpeechErrorDetected(null);
         }
-        // 'no-speech' is recoverable — keep recording and let onend restart it.
-        // Any other error is fatal, so stop trying to auto-restart.
-        const fatalErrors = new Set(['not-allowed', 'service-not-allowed', 'language-not-supported']);
+
+        if (event.error === 'not-allowed') {
+          addToast('未獲得麥克風權限，請檢查瀏覽器安全性設定，或使用下方手動鍵盤輸入。');
+        } else if (!recoverableErrors.has(event.error)) {
+          addToast(`錄音發生錯誤：${event.error}。可暫時使用下方手動鍵盤輸入。`);
+        }
+
         if (fatalErrors.has(event.error)) {
           shouldKeepRecordingRef.current = false;
         }
