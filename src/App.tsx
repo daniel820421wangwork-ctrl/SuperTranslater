@@ -283,6 +283,7 @@ interface AISettings {
 // allow browser CORS requests.
 const OPENAI_BASE = import.meta.env.PROD ? 'https://api.openai.com' : '/api/openai';
 const ANTHROPIC_BASE = import.meta.env.PROD ? 'https://api.anthropic.com' : '/api/anthropic';
+const DEFAULT_GEMINI_API_KEY = process.env.GEMINI_API_KEY as string;
 
 // Selectable Chinese-translation font sizes (px) with short labels.
 const TRANS_FONT_SIZES = [
@@ -683,7 +684,7 @@ export default function App() {
   }, [isMenuOpen]);
 
   const getGeminiClient = useCallback((customKey?: string) => {
-    const key = customKey || (process.env.GEMINI_API_KEY as string);
+    const key = customKey || DEFAULT_GEMINI_API_KEY;
     if (!key) {
       throw new Error('尚未設定 Gemini API 金鑰，請於右上角「設定」配置，或改用 OpenAI / Claude 引擎。');
     }
@@ -1889,7 +1890,7 @@ export default function App() {
     const opts: { provider: 'openai' | 'claude' | 'gemini'; key: string; model: string }[] = [
       { provider: 'openai', key: s.openaiKey, model: s.openaiModel },
       { provider: 'claude', key: s.claudeKey, model: s.claudeModel },
-      { provider: 'gemini', key: s.geminiKey, model: s.geminiModel },
+      { provider: 'gemini', key: s.geminiKey || DEFAULT_GEMINI_API_KEY, model: s.geminiModel },
     ];
     const selected = opts.find(o => o.provider === s.provider && o.key);
     return selected || opts.find(o => o.key) || null;
@@ -1996,10 +1997,14 @@ export default function App() {
     const info = keyInfoRef.current;
     const mode = effectiveTranslateMode;
     for (const h of history) {
+      const hasNoFinalTranslation =
+        h.translated === undefined || h.translated === null || h.translated === '';
+      const onlyHasDualDraftTranslation =
+        h.mode === 'dual' && h.status === 'translating' && !h.hasFinal;
       if (
         h.status === 'translating'
         && !!h.original.trim()
-        && (h.translated === undefined || h.translated === null || h.translated === '')
+        && (hasNoFinalTranslation || onlyHasDualDraftTranslation)
         && !translatingKeysRef.current.has(h.id)
       ) {
         translatingKeysRef.current.add(h.id);
