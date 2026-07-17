@@ -65,12 +65,14 @@ const runtimeAssetPlugin = () => ({
 
 export default defineConfig(({mode, command}) => {
   const env = loadEnv(mode, '.', '');
+  const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, 'package.json'), 'utf-8'));
   return {
     // Served at the repo subpath on GitHub Pages; root in dev/preview.
     base: command === 'build' ? '/SuperTranslater/' : '/',
     plugins: [react(), tailwindcss(), runtimeAssetPlugin()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY || ''),
+      '__APP_VERSION__': JSON.stringify(pkg.version || '0.0.0'),
     },
     resolve: {
       alias: {

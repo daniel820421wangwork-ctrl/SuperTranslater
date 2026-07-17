@@ -57,6 +57,8 @@ import {
 } from './browserTranslate';
 import { MicVAD } from '@ricky0123/vad-web';
 
+declare const __APP_VERSION__: string;
+
 type TranslateMode = 'ai' | 'browser';
 type RecognitionMode = 'dual' | 'live' | 'whisper';
 type SegmentStatus = 'initial-ready' | 'whisper-processing' | 'translating' | 'completed' | 'failed';
@@ -2282,6 +2284,9 @@ export default function App() {
             <h1 className="text-[11px] font-extrabold tracking-tight text-zinc-400">
               Swift<span className="text-indigo-600">⚡</span>
             </h1>
+            <span className="px-1.5 py-0.5 rounded-md bg-zinc-100/80 text-[9px] font-mono font-bold text-zinc-400 border border-zinc-200/70">
+              v{__APP_VERSION__}
+            </span>
           </div>
 
           {/* Hamburger trigger */}
