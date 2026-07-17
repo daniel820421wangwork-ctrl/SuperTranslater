@@ -347,6 +347,13 @@ const isJunkTranscript = (t: string): boolean => {
   return false;
 };
 
+const MIN_WHISPER_AUDIO_SECONDS = 0.45;
+const MIN_WHISPER_AUDIO_RMS = 0.0015;
+const isUsableWhisperAudio = (audio: Float32Array): boolean =>
+  !!audio
+  && audio.length >= WHISPER_SAMPLE_RATE * MIN_WHISPER_AUDIO_SECONDS
+  && frameRms(audio) >= MIN_WHISPER_AUDIO_RMS;
+
 // CORS-safe API fetching helper for OpenAI
 const callOpenAI = async (apiKey: string, model: string, text: string, systemInstruction: string) => {
   const url = `${OPENAI_BASE}/v1/chat/completions`;
@@ -423,6 +430,8 @@ export default function App() {
     hasFinal: boolean;         // true once Whisper + configured translate are done
     showingDraft: boolean;     // user toggle: true = show draft, false = show final
   }[]>([]);
+  const historyRef = useRef<typeof history>([]);
+  useEffect(() => { historyRef.current = history; }, [history]);
   
   // Speech Recognition States
   const [isRecording, setIsRecording] = useState(false);
@@ -561,7 +570,7 @@ export default function App() {
   // jobId -> the clip's key + originating device, so the result is attributed right.
   const clipJobsRef = useRef<Map<number, {
     key: string; segmentId: string; mode: 'dual' | 'whisper';
-    deviceId: string; deviceLabel: string; ts: number;
+    deviceId: string; deviceLabel: string; ts: number; draftOriginal?: string;
   }>>(new Map());
   // Maps solo Whisper jobId → pre-created history entry id so the result updates the right row.
   const whisperJobEntryRef = useRef<Map<number, string>>(new Map());
@@ -1204,10 +1213,22 @@ export default function App() {
               status: 'translating',
             });
           } else if (roomIdRef.current) {
-            updateSegment(roomIdRef.current, job.segmentId, {
-              status: 'failed',
-              translated: '[Whisper 無法辨識此段音訊]',
-            });
+            const existing = historyRef.current.find(h => h.id === job.segmentId);
+            const fallbackDraft = job.mode === 'dual'
+              ? (job.draftOriginal || existing?.draftOriginal || '').trim()
+              : '';
+            if (fallbackDraft) {
+              updateSegment(roomIdRef.current, job.segmentId, {
+                original: fallbackDraft,
+                translated: null,
+                status: 'translating',
+              });
+            } else {
+              updateSegment(roomIdRef.current, job.segmentId, {
+                status: 'failed',
+                translated: '[Whisper 無法辨識此段音訊]',
+              });
+            }
           }
           if (roomIdRef.current) deleteClip(roomIdRef.current, job.key);
           claimedRoomClipKeysRef.current.delete(job.key);
@@ -1288,7 +1309,18 @@ export default function App() {
   // Solo path: transcribe this device's own utterance with local Whisper.
   // Creates a history entry immediately (with optional Web Speech draft) before queuing the job.
   const transcribeLocal = useCallback((audio: Float32Array, draftOriginal?: string, existingEntryId?: string) => {
-    if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25) return;
+    if (!isUsableWhisperAudio(audio)) {
+      if (existingEntryId) {
+        setHistory(prev => prev.map(h => h.id === existingEntryId ? {
+          ...h,
+          status: draftOriginal ? 'translating' : 'failed',
+          translated: draftOriginal ? undefined : '[Whisper 無法辨識此段音訊]',
+          hasFinal: !draftOriginal,
+        } : h));
+        if (draftOriginal) translateFinalSegment(draftOriginal, existingEntryId);
+      }
+      return;
+    }
     if (!whisperReadyRef.current && !whisperLoadingRef.current) loadWhisperModel();
     normalizeAudio(audio);
     let entryId: string;
@@ -1314,7 +1346,7 @@ export default function App() {
     const id = ++whisperJobRef.current;
     whisperJobEntryRef.current.set(id, entryId);
     enqueueWhisperJob(id, audio);
-  }, [enqueueWhisperJob, loadWhisperModel]);
+  }, [enqueueWhisperJob, loadWhisperModel, translateFinalSegment]);
 
   const waitForSpeechDraft = useCallback(async (capture: SpeechDraftCapture): Promise<string> => {
     const deadline = Date.now() + 1600;
@@ -1377,9 +1409,9 @@ export default function App() {
 
   // VAD is the single segmentation source for all three recognition modes.
   const handleUtterance = useCallback(async (audio: Float32Array, capture: SpeechDraftCapture) => {
-    if (!audio || audio.length < WHISPER_SAMPLE_RATE * 0.25) return;
     const mode = recognitionModeRef.current;
     vadSpeechActiveRef.current = false;
+    if (!isUsableWhisperAudio(audio)) return;
     pendingSpeechDraftRef.current = capture;
     // Late Web Speech results can still update this detached capture, but a
     // subsequent VAD speech start receives a fresh object and cannot mutate it.
@@ -1424,6 +1456,7 @@ export default function App() {
             deviceId: deviceIdRef.current,
             deviceLabel: deviceLabelRef.current,
             ts: Date.now(),
+            draftOriginal: mode === 'dual' && draft ? draft : undefined,
           });
         }
         setWhisperActivity('listening');
@@ -1919,6 +1952,7 @@ export default function App() {
         clipJobsRef.current.set(jobId, {
           key, segmentId: clip.segmentId, mode: clip.mode,
           deviceId: clip.deviceId, deviceLabel: clip.deviceLabel, ts: clip.ts,
+          draftOriginal: clip.draftOriginal,
         });
         enqueueWhisperJob(jobId, audio);
       } catch (error) {

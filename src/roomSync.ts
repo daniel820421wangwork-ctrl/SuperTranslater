@@ -154,6 +154,7 @@ export type RoomClip = {
   ts: number;
   segmentId: string;
   mode: 'dual' | 'whisper';
+  draftOriginal?: string;
 };
 
 export const pushClip = (roomId: string, clip: RoomClip): void => {
