@@ -456,6 +456,7 @@ export default function App() {
   const utteranceProcessingQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastBrowserDraftSnapshotRef = useRef('');
   const liveRecognitionActiveRef = useRef(false);
+  const liveRecognitionRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const whisperRecordingActiveRef = useRef(false);
   const pendingDualWhisperStartRef = useRef(false);
   const [selectedLang, setSelectedLang] = useState('en-US');
@@ -1582,6 +1583,10 @@ export default function App() {
       recognition.lang = selectedLang;
 
       recognition.onstart = () => {
+        if (liveRecognitionRestartTimerRef.current) {
+          clearTimeout(liveRecognitionRestartTimerRef.current);
+          liveRecognitionRestartTimerRef.current = null;
+        }
         liveRecognitionActiveRef.current = true;
         isActualRecordingRef.current = true;
         setIsRecording(true);
@@ -1639,10 +1644,9 @@ export default function App() {
       recognition.onerror = (event: any) => {
         if (event.error === 'aborted') {
           console.warn('Speech recognition aborted');
-          return;
+        } else {
+          console.error('Speech recognition error', event.error);
         }
-
-        console.error('Speech recognition error', event.error);
         setSpeechErrorDetected(event.error);
         if (event.error === 'not-allowed') {
           addToast('未獲得麥克風權限，請檢查瀏覽器安全性設定，或直接在下方手動鍵盤輸入唷！');
@@ -1653,7 +1657,8 @@ export default function App() {
         }
         // 'no-speech' is recoverable — keep recording and let onend restart it.
         // Any other error is fatal, so stop trying to auto-restart.
-        if (event.error !== 'no-speech') {
+        const fatalErrors = new Set(['not-allowed', 'service-not-allowed', 'language-not-supported']);
+        if (fatalErrors.has(event.error)) {
           shouldKeepRecordingRef.current = false;
         }
         liveRecognitionActiveRef.current = false;
@@ -1692,11 +1697,13 @@ export default function App() {
             return;
           } catch (err) {
             console.warn('Auto-restart failed, retrying shortly', err);
-            setTimeout(() => {
+            if (liveRecognitionRestartTimerRef.current) clearTimeout(liveRecognitionRestartTimerRef.current);
+            liveRecognitionRestartTimerRef.current = setTimeout(() => {
+              liveRecognitionRestartTimerRef.current = null;
               if (shouldKeepRecordingRef.current) {
                 try { recognition.start(); } catch (e) { console.error('Restart failed', e); }
               }
-            }, 300);
+            }, 500);
             return;
           }
         }
@@ -1725,6 +1732,10 @@ export default function App() {
   useEffect(() => {
     if (isActualRecordingRef.current) {
       shouldKeepRecordingRef.current = false;
+      if (liveRecognitionRestartTimerRef.current) {
+        clearTimeout(liveRecognitionRestartTimerRef.current);
+        liveRecognitionRestartTimerRef.current = null;
+      }
       try { recognitionRef.current?.stop(); } catch {}
       stopWhisperRecording();
     }
@@ -1831,6 +1842,10 @@ export default function App() {
 
   const stopRecording = useCallback(() => {
     shouldKeepRecordingRef.current = false;
+    if (liveRecognitionRestartTimerRef.current) {
+      clearTimeout(liveRecognitionRestartTimerRef.current);
+      liveRecognitionRestartTimerRef.current = null;
+    }
     pendingDualWhisperStartRef.current = false;
     if (liveRecognitionActiveRef.current && recognitionRef.current) {
       try {
