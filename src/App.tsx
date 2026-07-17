@@ -349,12 +349,10 @@ const isJunkTranscript = (t: string): boolean => {
   return false;
 };
 
-const MIN_WHISPER_AUDIO_SECONDS = 0.45;
-const MIN_WHISPER_AUDIO_RMS = 0.0015;
+const MIN_WHISPER_AUDIO_SECONDS = 0.25;
 const isUsableWhisperAudio = (audio: Float32Array): boolean =>
   !!audio
-  && audio.length >= WHISPER_SAMPLE_RATE * MIN_WHISPER_AUDIO_SECONDS
-  && frameRms(audio) >= MIN_WHISPER_AUDIO_RMS;
+  && audio.length >= WHISPER_SAMPLE_RATE * MIN_WHISPER_AUDIO_SECONDS;
 
 // CORS-safe API fetching helper for OpenAI
 const callOpenAI = async (apiKey: string, model: string, text: string, systemInstruction: string) => {
