@@ -464,6 +464,10 @@ export default function App() {
   });
   const pendingSpeechDraftRef = useRef<SpeechDraftCapture | null>(null);
   const vadSpeechActiveRef = useRef(false);
+  const vadAvailableRef = useRef(true);
+  const vadFallbackModeRef = useRef(false);
+  const webSpeechFallbackBufferRef = useRef('');
+  const webSpeechFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const utteranceProcessingQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastBrowserDraftSnapshotRef = useRef('');
   const liveRecognitionActiveRef = useRef(false);
@@ -1431,6 +1435,23 @@ export default function App() {
     return current;
   }, []);
 
+  const enqueueWebSpeechFallbackSegment = useCallback((text: string) => {
+    const clean = text.replace(/\s+/g, ' ').trim();
+    if (!clean) return;
+    webSpeechFallbackBufferRef.current = `${webSpeechFallbackBufferRef.current} ${clean}`.trim();
+    if (webSpeechFallbackTimerRef.current) clearTimeout(webSpeechFallbackTimerRef.current);
+    webSpeechFallbackTimerRef.current = setTimeout(() => {
+      webSpeechFallbackTimerRef.current = null;
+      const segment = webSpeechFallbackBufferRef.current.trim();
+      webSpeechFallbackBufferRef.current = '';
+      if (!segment) return;
+      const mode = recognitionModeRef.current;
+      if (mode === 'whisper') return;
+      console.warn('[vad:fallback-webspeech-segment]', { mode, segmentPreview: segment.slice(0, 180) });
+      commitWebSpeechSegment(segment, mode === 'dual' ? 'live' : 'live');
+    }, 900);
+  }, [commitWebSpeechSegment]);
+
   // VAD is the single segmentation source for all three recognition modes.
   const handleUtterance = useCallback(async (audio: Float32Array, capture: SpeechDraftCapture) => {
     const mode = recognitionModeRef.current;
@@ -1500,6 +1521,11 @@ export default function App() {
   const stopWhisperRecording = useCallback(() => {
     whisperRecordingActiveRef.current = false;
     setWhisperActivity('idle');
+    if (webSpeechFallbackTimerRef.current) {
+      clearTimeout(webSpeechFallbackTimerRef.current);
+      webSpeechFallbackTimerRef.current = null;
+    }
+    webSpeechFallbackBufferRef.current = '';
     if (vadRef.current) {
       try { vadRef.current.destroy(); } catch {}
       vadRef.current = null;
@@ -1594,6 +1620,8 @@ export default function App() {
       }
       vadRef.current = vad;
       await vad.start();
+      vadAvailableRef.current = true;
+      vadFallbackModeRef.current = false;
       whisperRecordingActiveRef.current = true;
       isActualRecordingRef.current = true;
       setIsRecording(true);
@@ -1603,8 +1631,14 @@ export default function App() {
       console.error('VAD/mic error', err);
       const problem = describeMicrophoneError(err);
       setSpeechErrorDetected(problem.code);
-      addToast(problem.message, 'error');
-      stopWhisperRecording();
+      vadAvailableRef.current = false;
+      vadFallbackModeRef.current = true;
+      whisperRecordingActiveRef.current = false;
+      setWhisperActivity('idle');
+      addToast(`${problem.message} 已改用 Web Speech 直接切段翻譯。`, 'info');
+      const stillRecording = liveRecognitionActiveRef.current;
+      isActualRecordingRef.current = stillRecording;
+      setIsRecording(stillRecording);
     }
   }, [addToast, handleUtterance, stopWhisperRecording, vadThreshold, whisperPauseMs]);
 
@@ -1645,6 +1679,9 @@ export default function App() {
           const next = `${liveDraftTranscriptRef.current} ${finalText}`.trim();
           liveDraftTranscriptRef.current = next;
           setLiveDraftTranscript(next);
+          if (vadFallbackModeRef.current) {
+            enqueueWebSpeechFallbackSegment(finalText);
+          }
         }
 
         const pending = pendingSpeechDraftRef.current;
@@ -1834,6 +1871,12 @@ export default function App() {
     };
     pendingSpeechDraftRef.current = null;
     vadSpeechActiveRef.current = false;
+    vadFallbackModeRef.current = false;
+    webSpeechFallbackBufferRef.current = '';
+    if (webSpeechFallbackTimerRef.current) {
+      clearTimeout(webSpeechFallbackTimerRef.current);
+      webSpeechFallbackTimerRef.current = null;
+    }
     utteranceProcessingQueueRef.current = Promise.resolve();
     lastBrowserDraftSnapshotRef.current = '';
     lastInterimRef.current = '';
