@@ -11,6 +11,7 @@ import { cn } from './lib/utils';
 import { isFirebaseConfigured, parseFirebaseConfig, saveFirebaseConfig, clearFirebaseConfig } from './firebaseConfig';
 import {
   pushSegment, updateSegment, clearRoomSegments, subscribeSegments,
+  updateSegmentUnlessCompleted,
   joinPresence, leavePresence, subscribeMembers, subscribeConnection,
   setMemberRecording, setMemberMeta, sendCommand, subscribeCommand,
   setRoomConfig, subscribeRoomConfig,
@@ -2299,7 +2300,7 @@ export default function App() {
           .then((result) => {
             const t = result.text;
             const src = transLabelFor(mode, mode === 'browser' ? null : result.source);
-            if (roomIdRef.current) updateSegment(roomIdRef.current, segId, {
+            if (roomIdRef.current) updateSegmentUnlessCompleted(roomIdRef.current, segId, {
               translated: t || '[翻譯失敗]',
               translatedBy: src,
               status: t ? 'completed' : 'failed',
@@ -2317,7 +2318,7 @@ export default function App() {
               reason,
               rawError: e,
             });
-            if (roomIdRef.current) updateSegment(roomIdRef.current, segId, {
+            if (roomIdRef.current) updateSegmentUnlessCompleted(roomIdRef.current, segId, {
               translated: `[翻譯失敗：${reason.slice(0, 180)}]`,
               status: 'failed',
             });

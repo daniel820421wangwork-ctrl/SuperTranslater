@@ -4,7 +4,7 @@
 import { initializeApp, getApps } from 'firebase/app';
 import {
   getDatabase, ref, push, update, remove, set,
-  onChildAdded, onChildChanged, onValue, onDisconnect, type Database,
+  onChildAdded, onChildChanged, onValue, onDisconnect, runTransaction, type Database,
 } from 'firebase/database';
 
 export type LiveTranscript = { text: string; label: string; ts: number };
@@ -67,6 +67,21 @@ export const updateSegment = (roomId: string, key: string, fields: Partial<RoomS
   const d = getDb();
   if (!d) return;
   update(ref(d, `rooms/${roomId}/segments/${key}`), stripUndefined(fields)).catch((e) => console.error('updateSegment failed', e));
+};
+
+export const updateSegmentUnlessCompleted = async (roomId: string, key: string, fields: Partial<RoomSegment>): Promise<boolean> => {
+  const d = getDb();
+  if (!d) return false;
+  const sanitized = stripUndefined(fields);
+  const result = await runTransaction(ref(d, `rooms/${roomId}/segments/${key}`), (current: RoomSegment | null) => {
+    if (!current) return current;
+    if (current.status === 'completed') return current;
+    return { ...current, ...sanitized };
+  }).catch((e) => {
+    console.error('updateSegmentUnlessCompleted failed', e);
+    return null;
+  });
+  return !!result?.committed;
 };
 
 export const clearRoomSegments = (roomId: string): void => {
