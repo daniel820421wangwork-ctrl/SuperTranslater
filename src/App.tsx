@@ -354,6 +354,15 @@ const isUsableWhisperAudio = (audio: Float32Array): boolean =>
   !!audio
   && audio.length >= WHISPER_SAMPLE_RATE * MIN_WHISPER_AUDIO_SECONDS;
 
+const summarizeError = (error: unknown): string => {
+  if (error instanceof Error) return error.message.slice(0, 500);
+  try {
+    return JSON.stringify(error).slice(0, 500);
+  } catch {
+    return String(error).slice(0, 500);
+  }
+};
+
 // CORS-safe API fetching helper for OpenAI
 const callOpenAI = async (apiKey: string, model: string, text: string, systemInstruction: string) => {
   const url = `${OPENAI_BASE}/v1/chat/completions`;
@@ -374,7 +383,8 @@ const callOpenAI = async (apiKey: string, model: string, text: string, systemIns
   });
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`OpenAI 錯誤 (${response.status}): ${errText}`);
+    console.error('[translation:openai:http-error]', { model, status: response.status, body: errText });
+    throw new Error(`OpenAI ${model} HTTP ${response.status}: ${errText}`);
   }
   const data = await response.json();
   if (data.choices && data.choices[0] && data.choices[0].message) {
@@ -405,7 +415,8 @@ const callClaude = async (apiKey: string, model: string, text: string, systemIns
   });
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`Claude 錯誤 (${response.status}): ${errText}`);
+    console.error('[translation:claude:http-error]', { model, status: response.status, body: errText });
+    throw new Error(`Claude ${model} HTTP ${response.status}: ${errText}`);
   }
   const data = await response.json();
   if (data.content && data.content[0]) {
@@ -923,9 +934,17 @@ export default function App() {
       
       return result;
     } catch (err) {
-      console.error('Segment translation error:', err);
-      addToast(err instanceof Error ? `服務器錯誤: ${err.message}` : '翻譯過程發生錯誤，AI 無法正常回傳結果。');
-      const errorMsg = '[翻譯錯誤，請檢查 API 設定與網路]';
+      const reason = summarizeError(err);
+      console.error('[translation:solo-segment-failed]', {
+        segmentId: id,
+        provider: aiSettings.provider,
+        model: aiSettings.provider === 'gemini' ? aiSettings.geminiModel : aiSettings.provider === 'openai' ? aiSettings.openaiModel : aiSettings.claudeModel,
+        originalPreview: text.slice(0, 240),
+        reason,
+        rawError: err,
+      });
+      addToast(`?????${reason.slice(0, 120)}`, 'error');
+      const errorMsg = `[?????${reason.slice(0, 180)}]`;
       if (id) {
         setHistory(prev => prev.map(item => item.id === id ? { ...item, translated: errorMsg } : item));
       }
@@ -961,9 +980,13 @@ export default function App() {
           ...h, translated: t, translatedBy: transLabelFor('browser', null),
           status: 'completed', hasFinal: true,
         } : h)))
-        .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? {
-          ...h, translated: '等待翻譯', status: 'failed', hasFinal: true,
-        } : h)));
+        .catch((error) => {
+          const reason = summarizeError(error);
+          console.error('[translation:browser-segment-failed]', { segmentId, originalPreview: text.slice(0, 240), reason, rawError: error });
+          setHistory(prev => prev.map(h => h.id === segmentId ? {
+            ...h, translated: `[瀏覽器翻譯失敗：${reason.slice(0, 160)}]`, status: 'failed', hasFinal: true,
+          } : h));
+        });
       return;
     }
     const label = transLabelFor('ai', keyInfoRef.current);
@@ -2027,18 +2050,34 @@ export default function App() {
 
   const translateWithFallback = useCallback(async (text: string): Promise<{ text: string; source: { provider: string; model: string } }> => {
     const candidates = translationCandidatesRef.current;
+    const attempts: Array<{ provider: string; model: string; error: string }> = [];
     let lastError: unknown = null;
+    console.info('[translation:start]', {
+      candidateCount: candidates.length,
+      candidates: candidates.map(c => ({ provider: c.provider, model: c.model, hasKey: !!c.key })),
+      preview: text.slice(0, 120),
+    });
     for (const candidate of candidates) {
       try {
         const translated = await translateWith(candidate, text);
         if (translated.trim()) return { text: translated.trim(), source: candidate };
         lastError = new Error(`${candidate.provider} returned empty translation`);
+        attempts.push({ provider: candidate.provider, model: candidate.model, error: summarizeError(lastError) });
       } catch (error) {
         lastError = error;
-        console.error(`translation failed with ${candidate.provider}/${candidate.model}`, error);
+        const summary = summarizeError(error);
+        attempts.push({ provider: candidate.provider, model: candidate.model, error: summary });
+        console.error('[translation:provider-failed]', {
+          provider: candidate.provider,
+          model: candidate.model,
+          error: summary,
+          rawError: error,
+        });
       }
     }
-    throw lastError instanceof Error ? lastError : new Error('no translation provider succeeded');
+    console.error('[translation:all-failed]', { attempts, lastError });
+    const detail = attempts.map(a => `${a.provider}/${a.model}: ${a.error}`).join(' | ');
+    throw new Error(detail || summarizeError(lastError) || 'no translation provider succeeded');
   }, [translateWith]);
 
   // Whether this device can serve as the room's translator under the current
@@ -2155,9 +2194,19 @@ export default function App() {
             });
           })
           .catch((e) => {
-            console.error('room translate failed', e);
+            const reason = summarizeError(e);
+            console.error('[translation:room-segment-failed]', {
+              segmentId: segId,
+              mode,
+              activeTranslator,
+              keyInfo: info ? { provider: info.provider, model: info.model, hasKey: !!info.key } : null,
+              candidates: translationCandidatesRef.current.map(c => ({ provider: c.provider, model: c.model, hasKey: !!c.key })),
+              originalPreview: h.original.slice(0, 240),
+              reason,
+              rawError: e,
+            });
             if (roomIdRef.current) updateSegment(roomIdRef.current, segId, {
-              translated: '[翻譯失敗，請檢查翻譯設定/金鑰]',
+              translated: `[翻譯失敗：${reason.slice(0, 180)}]`,
               status: 'failed',
             });
           })
