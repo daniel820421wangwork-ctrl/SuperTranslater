@@ -1252,7 +1252,6 @@ export default function App() {
           if (cleaned && !isJunkTranscript(cleaned) && roomIdRef.current) {
             updateSegment(roomIdRef.current, job.segmentId, {
               original: cleaned,
-              translated: null,
               status: 'translating',
             });
           } else if (roomIdRef.current) {
@@ -1263,7 +1262,6 @@ export default function App() {
             if (fallbackDraft) {
               updateSegment(roomIdRef.current, job.segmentId, {
                 original: fallbackDraft,
-                translated: null,
                 status: 'translating',
               });
             } else {

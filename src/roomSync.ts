@@ -41,6 +41,17 @@ const stripUndefined = <T>(value: T): T => {
   return value;
 };
 
+const isUsableTranslation = (value?: string | null): value is string => {
+  const text = (value || '').trim();
+  if (!text) return false;
+  if (text === '等待翻譯') return false;
+  if (text.includes('翻譯失敗')) return false;
+  if (text.includes('Whisper 無法辨識')) return false;
+  if (text.includes('Whisper 載入失敗')) return false;
+  if (text.includes('Whisper 轉錄失敗')) return false;
+  return true;
+};
+
 const getDb = (): Database | null => {
   const cfg = loadFirebaseConfig();
   if (!cfg) return null;
@@ -76,6 +87,21 @@ export const updateSegmentUnlessCompleted = async (roomId: string, key: string, 
   const result = await runTransaction(ref(d, `rooms/${roomId}/segments/${key}`), (current: RoomSegment | null) => {
     if (!current) return current;
     if (current.status === 'completed') return current;
+    if (sanitized.status === 'failed') {
+      const fallback = isUsableTranslation(current.translated)
+        ? current.translated
+        : isUsableTranslation(current.draftTranslated)
+          ? current.draftTranslated
+          : null;
+      if (fallback) {
+        return {
+          ...current,
+          translated: fallback,
+          status: 'completed',
+          translatedBy: current.translatedBy || '瀏覽器初步翻譯',
+        };
+      }
+    }
     return { ...current, ...sanitized };
   }).catch((e) => {
     console.error('updateSegmentUnlessCompleted failed', e);
