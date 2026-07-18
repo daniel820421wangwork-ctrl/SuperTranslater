@@ -1537,13 +1537,11 @@ export default function App() {
         throw new DOMException('Microphone access requires HTTPS or localhost', 'SecurityError');
       }
       const baseUrl = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
-      // Silero VAD detects real speech and hands us each utterance at 16kHz.
-      // Current vad-web uses millisecond-based segmentation options.
-      const vad = await MicVAD.new({
+      const createVadOptions = (model: 'v5' | 'legacy') => ({
         baseAssetPath: `${baseUrl}vad-assets/`,
         onnxWASMBasePath: `${baseUrl}ort-assets/`,
         startOnLoad: false,
-        model: 'v5',
+        model,
         positiveSpeechThreshold: vadThreshold,
         negativeSpeechThreshold: Math.max(0.1, vadThreshold - 0.15),
         redemptionMs: whisperPauseMs,
@@ -1579,6 +1577,21 @@ export default function App() {
             .catch((error) => console.error('utterance processing failed', error));
         },
       } as any);
+      // Silero VAD detects real speech and hands us each utterance at 16kHz.
+      // Try v5 first; if its ONNX download is reset/interrupted, fall back to
+      // the smaller legacy model so recording is not completely blocked.
+      let vad: any;
+      try {
+        vad = await MicVAD.new(createVadOptions('v5'));
+      } catch (v5Error) {
+        console.warn('[vad:model-load-failed]', {
+          model: 'v5',
+          reason: summarizeError(v5Error),
+          fallback: 'legacy',
+          rawError: v5Error,
+        });
+        vad = await MicVAD.new(createVadOptions('legacy'));
+      }
       vadRef.current = vad;
       await vad.start();
       whisperRecordingActiveRef.current = true;
