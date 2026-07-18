@@ -27,6 +27,20 @@ export type RoomSegment = {
 
 let db: Database | null = null;
 
+const stripUndefined = <T>(value: T): T => {
+  if (Array.isArray(value)) {
+    return value.map(stripUndefined) as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (child !== undefined) out[key] = stripUndefined(child);
+    }
+    return out as T;
+  }
+  return value;
+};
+
 const getDb = (): Database | null => {
   const cfg = loadFirebaseConfig();
   if (!cfg) return null;
@@ -45,14 +59,14 @@ export const pushSegment = (roomId: string, seg: RoomSegment): string | null => 
   const d = getDb();
   if (!d) return null;
   const r = push(ref(d, `rooms/${roomId}/segments`));
-  set(r, seg).catch((e) => console.error('pushSegment failed', e));
+  set(r, stripUndefined(seg)).catch((e) => console.error('pushSegment failed', e));
   return r.key;
 };
 
 export const updateSegment = (roomId: string, key: string, fields: Partial<RoomSegment>): void => {
   const d = getDb();
   if (!d) return;
-  update(ref(d, `rooms/${roomId}/segments/${key}`), fields).catch((e) => console.error('updateSegment failed', e));
+  update(ref(d, `rooms/${roomId}/segments/${key}`), stripUndefined(fields)).catch((e) => console.error('updateSegment failed', e));
 };
 
 export const clearRoomSegments = (roomId: string): void => {
@@ -80,7 +94,7 @@ export const joinPresence = (roomId: string, deviceId: string, label: string): v
   const d = getDb();
   if (!d) return;
   const meRef = ref(d, `rooms/${roomId}/members/${deviceId}`);
-  set(meRef, { label, ts: Date.now(), recording: false }).catch((e) => console.error('joinPresence failed', e));
+  set(meRef, stripUndefined({ label, ts: Date.now(), recording: false })).catch((e) => console.error('joinPresence failed', e));
   onDisconnect(meRef).remove().catch(() => {});
 };
 
@@ -88,14 +102,14 @@ export const joinPresence = (roomId: string, deviceId: string, label: string): v
 export const setMemberRecording = (roomId: string, deviceId: string, recording: boolean): void => {
   const d = getDb();
   if (!d) return;
-  update(ref(d, `rooms/${roomId}/members/${deviceId}`), { recording }).catch(() => {});
+  update(ref(d, `rooms/${roomId}/members/${deviceId}`), stripUndefined({ recording })).catch(() => {});
 };
 
 // Report member metadata (translate capability/provider, current recording mode).
 export const setMemberMeta = (roomId: string, deviceId: string, meta: { hasKey?: boolean; provider?: string; recMode?: string; canWhisper?: boolean }): void => {
   const d = getDb();
   if (!d) return;
-  update(ref(d, `rooms/${roomId}/members/${deviceId}`), meta).catch(() => {});
+  update(ref(d, `rooms/${roomId}/members/${deviceId}`), stripUndefined(meta)).catch(() => {});
 };
 
 // Send a start/stop command to another device. For 'start', an optional
@@ -103,7 +117,7 @@ export const setMemberMeta = (roomId: string, deviceId: string, meta: { hasKey?:
 export const sendCommand = (roomId: string, targetDeviceId: string, action: 'start' | 'stop', from: string, mode?: 'dual' | 'live' | 'whisper'): void => {
   const d = getDb();
   if (!d) return;
-  set(ref(d, `rooms/${roomId}/commands/${targetDeviceId}`), { action, ts: Date.now(), from, mode: mode || null }).catch(() => {});
+  set(ref(d, `rooms/${roomId}/commands/${targetDeviceId}`), stripUndefined({ action, ts: Date.now(), from, mode: mode || null })).catch(() => {});
 };
 
 // Listen for commands addressed to this device.
@@ -161,7 +175,7 @@ export const pushClip = (roomId: string, clip: RoomClip): void => {
   const d = getDb();
   if (!d) return;
   const r = push(ref(d, `rooms/${roomId}/clips`));
-  set(r, clip).catch((e) => console.error('pushClip failed', e));
+  set(r, stripUndefined(clip)).catch((e) => console.error('pushClip failed', e));
 };
 
 export const subscribeClips = (
@@ -183,7 +197,7 @@ export const deleteClip = (roomId: string, key: string): void => {
 export const setRoomConfig = (roomId: string, config: { translateMode: string }): void => {
   const d = getDb();
   if (!d) return;
-  update(ref(d, `rooms/${roomId}/config`), config).catch(() => {});
+  update(ref(d, `rooms/${roomId}/config`), stripUndefined(config)).catch(() => {});
 };
 
 export const subscribeRoomConfig = (
@@ -199,7 +213,7 @@ export const subscribeRoomConfig = (
 export const setLiveTranscript = (roomId: string, deviceId: string, text: string, deviceLabel: string): void => {
   const d = getDb();
   if (!d) return;
-  update(ref(d, `rooms/${roomId}/live/${deviceId}`), { text, label: deviceLabel, ts: Date.now() }).catch(() => {});
+  update(ref(d, `rooms/${roomId}/live/${deviceId}`), stripUndefined({ text, label: deviceLabel, ts: Date.now() })).catch(() => {});
 };
 
 export const clearLiveTranscript = (roomId: string, deviceId: string): void => {
