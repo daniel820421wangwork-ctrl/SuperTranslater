@@ -244,19 +244,19 @@ const analyzeSessionMemory = (text: string) => {
 // Available models per provider
 const PROVIDER_MODELS = {
   gemini: [
-    { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (推薦 - 極速卓越)' },
-    { value: 'gemini-3.5-pro', label: 'Gemini 3.5 Pro (旗艦 - 精巧學術)' },
-    { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview (預覽版本)' }
+    { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (?? - ?????)' },
+    { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview (??)' },
+    { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview (??)' }
   ],
   openai: [
-    { value: 'gpt-4o-mini', label: 'GPT-4o Mini (推薦 - 快速極致)' },
-    { value: 'gpt-4o', label: 'GPT-4o (完整最高解析力)' },
-    { value: 'o1-mini', label: 'o1 Mini (進階長鏈推演)' }
+    { value: 'gpt-4o-mini', label: 'GPT-4o Mini (?? - ??)' },
+    { value: 'gpt-4o', label: 'GPT-4o (???)' },
+    { value: 'gpt-4.1-mini', label: 'GPT-4.1 Mini (??)' }
   ],
   claude: [
-    { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (推薦 - 頂尖語感)' },
-    { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (極速輕盈)' },
-    { value: 'claude-opus-4-8', label: 'Claude Opus 4.8 (旗艦 - 最高能力)' }
+    { value: 'claude-sonnet-5', label: 'Claude Sonnet 5 (?? - ???)' },
+    { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (??)' },
+    { value: 'claude-opus-4-8', label: 'Claude Opus 4.8 (??)' }
   ]
 };
 
@@ -475,7 +475,7 @@ export default function App() {
           provider: parsed.provider || 'claude',
           geminiModel: validModel('gemini', parsed.geminiModel || 'gemini-3.5-flash'),
           openaiModel: validModel('openai', parsed.openaiModel || 'gpt-4o-mini'),
-          claudeModel: validModel('claude', parsed.claudeModel || 'claude-sonnet-4-6'),
+          claudeModel: validModel('claude', parsed.claudeModel || 'claude-sonnet-5'),
           geminiKey: parsed.geminiKey || '',
           openaiKey: parsed.openaiKey || '',
           claudeKey: parsed.claudeKey || '',
@@ -488,7 +488,7 @@ export default function App() {
       provider: 'claude',
       geminiModel: 'gemini-3.5-flash',
       openaiModel: 'gpt-4o-mini',
-      claudeModel: 'claude-sonnet-4-6',
+      claudeModel: 'claude-sonnet-5',
       geminiKey: '',
       openaiKey: '',
       claudeKey: '',
@@ -1996,9 +1996,24 @@ export default function App() {
     const selected = opts.find(o => o.provider === s.provider && o.key);
     return selected || opts.find(o => o.key) || null;
   }, [aiSettings]);
+  const translationCandidates = useMemo(() => {
+    const s = aiSettings;
+    const allOpts: { provider: 'openai' | 'claude' | 'gemini'; key: string; model: string }[] = [
+      { provider: 'openai', key: s.openaiKey, model: s.openaiModel },
+      { provider: 'claude', key: s.claudeKey, model: s.claudeModel },
+      { provider: 'gemini', key: s.geminiKey || DEFAULT_GEMINI_API_KEY, model: s.geminiModel },
+    ];
+    const opts = allOpts.filter(o => !!o.key);
+    const selectedIdx = opts.findIndex(o => o.provider === s.provider);
+    if (selectedIdx <= 0) return opts;
+    const selected = opts[selectedIdx];
+    return [selected, ...opts.filter((_, idx) => idx !== selectedIdx)];
+  }, [aiSettings]);
   const hasUsableKey = !!keyInfo;
   const keyInfoRef = useRef(keyInfo);
   useEffect(() => { keyInfoRef.current = keyInfo; });
+  const translationCandidatesRef = useRef(translationCandidates);
+  useEffect(() => { translationCandidatesRef.current = translationCandidates; });
 
   // Translate a piece of text with a specific provider/key (room translator path).
   const translateWith = useCallback(async (info: NonNullable<typeof keyInfo>, text: string): Promise<string> => {
@@ -2009,6 +2024,22 @@ export default function App() {
     const r = await client.models.generateContent({ model: info.model, contents: text, config: { systemInstruction: sys } });
     return (r.text || '').trim();
   }, [getGeminiClient]);
+
+  const translateWithFallback = useCallback(async (text: string): Promise<{ text: string; source: { provider: string; model: string } }> => {
+    const candidates = translationCandidatesRef.current;
+    let lastError: unknown = null;
+    for (const candidate of candidates) {
+      try {
+        const translated = await translateWith(candidate, text);
+        if (translated.trim()) return { text: translated.trim(), source: candidate };
+        lastError = new Error(`${candidate.provider} returned empty translation`);
+      } catch (error) {
+        lastError = error;
+        console.error(`translation failed with ${candidate.provider}/${candidate.model}`, error);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('no translation provider succeeded');
+  }, [translateWith]);
 
   // Whether this device can serve as the room's translator under the current
   // mode: AI needs a key; browser needs Translator API support; off needs none.
@@ -2110,11 +2141,13 @@ export default function App() {
       ) {
         translatingKeysRef.current.add(h.id);
         const segId = h.id;
-        const job = mode === 'browser' ? browserTranslate(h.original)
-          : (info ? translateWith(info, h.original) : Promise.reject(new Error('no key')));
-        const src = transLabelFor(mode, mode === 'browser' ? null : info);
+        const job = mode === 'browser'
+          ? browserTranslate(h.original).then(t => ({ text: t, source: null }))
+          : (info ? translateWithFallback(h.original) : Promise.reject(new Error('no key')));
         job
-          .then((t) => {
+          .then((result) => {
+            const t = result.text;
+            const src = transLabelFor(mode, mode === 'browser' ? null : result.source);
             if (roomIdRef.current) updateSegment(roomIdRef.current, segId, {
               translated: t || '[翻譯失敗]',
               translatedBy: src,
@@ -2131,7 +2164,7 @@ export default function App() {
           .finally(() => translatingKeysRef.current.delete(segId));
       }
     }
-  }, [history, activeTranslator, translateWith, effectiveTranslateMode]);
+  }, [history, activeTranslator, translateWithFallback, effectiveTranslateMode]);
 
   const handleSaveSegmentEdit = async (id: string) => {
     const text = editingText.trim();
