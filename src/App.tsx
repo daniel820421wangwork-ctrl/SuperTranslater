@@ -2262,12 +2262,13 @@ export default function App() {
     return capable[0] || null;
   }, [roomMembers]);
 
-  // If this device is the elected translator, translate untranslated segments
-  // and sync the result. Skipped entirely when the room mode is "off".
+  // Any capable device may translate pending room segments. We still display an
+  // elected translator for clarity, but do not hard-block on it: room presence
+  // can lag or elect another device that is open but not actually processing.
   const translatingKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!roomIdRef.current) return;
-    if (!activeTranslator || activeTranslator.id !== deviceIdRef.current) return;
+    if (!deviceCanTranslate) return;
     const info = keyInfoRef.current;
     const mode = effectiveTranslateMode;
     for (const h of history) {
@@ -2283,6 +2284,14 @@ export default function App() {
       ) {
         translatingKeysRef.current.add(h.id);
         const segId = h.id;
+        console.info('[translation:room-segment-claim]', {
+          segmentId: segId,
+          deviceId: deviceIdRef.current,
+          deviceLabel: deviceLabelRef.current,
+          electedTranslator: activeTranslator ? { id: activeTranslator.id, label: activeTranslator.label, provider: activeTranslator.provider } : null,
+          mode,
+          originalPreview: h.original.slice(0, 160),
+        });
         const job = mode === 'browser'
           ? browserTranslate(h.original).then(t => ({ text: t, source: null }))
           : (info ? translateWithFallback(h.original) : Promise.reject(new Error('no key')));
@@ -2316,7 +2325,7 @@ export default function App() {
           .finally(() => translatingKeysRef.current.delete(segId));
       }
     }
-  }, [history, activeTranslator, translateWithFallback, effectiveTranslateMode]);
+  }, [history, activeTranslator, deviceCanTranslate, translateWithFallback, effectiveTranslateMode]);
 
   const handleSaveSegmentEdit = async (id: string) => {
     const text = editingText.trim();
