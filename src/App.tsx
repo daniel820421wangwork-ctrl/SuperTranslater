@@ -371,6 +371,34 @@ const summarizeError = (error: unknown): string => {
   }
 };
 
+const isPendingTranslationText = (value?: string | null): boolean => {
+  const text = (value || '').trim();
+  return !text || text === '等待翻譯';
+};
+
+const isTranslationFailureText = (value?: string | null): boolean => {
+  const text = (value || '').trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return text.includes('翻譯失敗')
+    || text.includes('瀏覽器翻譯失敗')
+    || text.includes('請檢查翻譯設定')
+    || lower.includes('translation failed');
+};
+
+const isWhisperFailureText = (value?: string | null): boolean => {
+  const text = (value || '').trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return (text.includes('Whisper') || lower.includes('whisper'))
+    && (text.includes('無法辨識') || text.includes('失敗') || lower.includes('failed'));
+};
+
+const isUsableDisplayTranslation = (value?: string | null): value is string =>
+  !isPendingTranslationText(value)
+  && !isTranslationFailureText(value)
+  && !isWhisperFailureText(value);
+
 // CORS-safe API fetching helper for OpenAI
 const callOpenAI = async (apiKey: string, model: string, text: string, systemInstruction: string) => {
   const url = `${OPENAI_BASE}/v1/chat/completions`;
@@ -442,6 +470,7 @@ export default function App() {
   const [history, setHistory] = useState<{
     id: string; original: string; translated?: string; timestamp: number;
     deviceLabel?: string; deviceId?: string; translatedBy?: string;
+    failureReason?: string;
     mode?: RecognitionMode;
     status?: SegmentStatus;
     draftOriginal?: string;    // Immediate Web Speech text (dual mode) or undefined
@@ -944,7 +973,7 @@ export default function App() {
       }
       
       if (id) {
-        setHistory(prev => prev.map(item => item.id === id ? { ...item, translated: result } : item));
+        setHistory(prev => prev.map(item => item.id === id ? { ...item, translated: result, failureReason: undefined } : item));
       }
       
       return result;
@@ -961,7 +990,7 @@ export default function App() {
       addToast(`?????${reason.slice(0, 120)}`, 'error');
       const errorMsg = `[?????${reason.slice(0, 180)}]`;
       if (id) {
-        setHistory(prev => prev.map(item => item.id === id ? { ...item, translated: errorMsg } : item));
+        setHistory(prev => prev.map(item => item.id === id ? { ...item, translated: errorMsg, failureReason: reason } : item));
       }
       return errorMsg;
     }
@@ -993,21 +1022,25 @@ export default function App() {
       browserTranslate(text)
         .then(t => setHistory(prev => prev.map(h => h.id === segmentId ? {
           ...h, translated: t, translatedBy: transLabelFor('browser', null),
-          status: 'completed', hasFinal: true,
+          status: 'completed', hasFinal: true, failureReason: undefined,
         } : h)))
         .catch((error) => {
           const reason = summarizeError(error);
           console.error('[translation:browser-segment-failed]', { segmentId, originalPreview: text.slice(0, 240), reason, rawError: error });
           setHistory(prev => prev.map(h => h.id === segmentId ? {
-            ...h, translated: `[瀏覽器翻譯失敗：${reason.slice(0, 160)}]`, status: 'failed', hasFinal: true,
+            ...h, translated: `[瀏覽器翻譯失敗：${reason.slice(0, 160)}]`, failureReason: reason, status: 'failed', hasFinal: true,
           } : h));
         });
       return;
     }
     const label = transLabelFor('ai', keyInfoRef.current);
     Promise.resolve(translateSegmentRef.current(text, segmentId))
-      .then(() => setHistory(prev => prev.map(h => h.id === segmentId ? {
-        ...h, translatedBy: label, status: 'completed', hasFinal: true,
+      .then((translated) => setHistory(prev => prev.map(h => h.id === segmentId ? {
+        ...h,
+        translatedBy: label,
+        status: isTranslationFailureText(translated) ? 'failed' : 'completed',
+        hasFinal: true,
+        failureReason: isTranslationFailureText(translated) ? h.failureReason || translated : undefined,
       } : h)))
       .catch(() => setHistory(prev => prev.map(h => h.id === segmentId ? {
         ...h, status: 'failed', hasFinal: true,
@@ -1104,6 +1137,7 @@ export default function App() {
           id: key, original: seg.original,
           translated: seg.translated ?? undefined, timestamp: seg.ts,
           deviceLabel: seg.deviceLabel, deviceId: seg.deviceId, translatedBy: seg.translatedBy,
+          failureReason: seg.failureReason,
           mode: seg.mode, status: seg.status,
           draftOriginal: seg.draftOriginal,
           draftTranslated: seg.draftTranslated ?? undefined,
@@ -1120,6 +1154,7 @@ export default function App() {
         original: seg.original ?? h.original,
         translated: seg.translated === null ? undefined : (seg.translated ?? h.translated),
         translatedBy: seg.translatedBy ?? h.translatedBy,
+        failureReason: seg.failureReason ?? h.failureReason,
         draftOriginal: seg.draftOriginal ?? h.draftOriginal,
         draftTranslated: seg.draftTranslated ?? h.draftTranslated,
         mode: seg.mode ?? h.mode,
@@ -2306,7 +2341,8 @@ export default function App() {
             if (roomIdRef.current) updateSegmentUnlessCompleted(roomIdRef.current, segId, {
               translated: t || '[翻譯失敗]',
               translatedBy: src,
-              status: t ? 'completed' : 'failed',
+              status: t && !isTranslationFailureText(t) ? 'completed' : 'failed',
+              failureReason: isTranslationFailureText(t) ? t : undefined,
             });
           })
           .catch((e) => {
@@ -2324,6 +2360,7 @@ export default function App() {
             if (roomIdRef.current) updateSegmentUnlessCompleted(roomIdRef.current, segId, {
               translated: `[翻譯失敗：${reason.slice(0, 180)}]`,
               status: 'failed',
+              failureReason: reason,
             });
           })
           .finally(() => translatingKeysRef.current.delete(segId));
@@ -3116,19 +3153,25 @@ export default function App() {
                   const isProcessing = !entry.hasFinal;
                   const hasDraftComparison = !!entry.draftOriginal;
                   const isWhisperProcessing = entry.mode === 'dual' && entry.status === 'whisper-processing';
+                  const aiTranslationFailed = isTranslationFailureText(entry.translated);
+                  const whisperFailed = isWhisperFailureText(entry.original) || isWhisperFailureText(entry.translated);
+                  const failureDetail = entry.failureReason
+                    || (aiTranslationFailed ? entry.translated : undefined)
+                    || (whisperFailed ? (isWhisperFailureText(entry.original) ? entry.original : entry.translated) : undefined);
+                  const hasFailure = entry.status === 'failed' || !!failureDetail;
                   const canShowRawOriginal = !!entry.draftOriginal;
-                  const canShowWhisperOriginal = !!entry.original && (!entry.draftOriginal || entry.original !== entry.draftOriginal || entry.hasFinal);
-                  const canShowRawTranslation = !!entry.draftTranslated;
+                  const canShowWhisperOriginal = !!entry.original && !isWhisperFailureText(entry.original) && (!entry.draftOriginal || entry.original !== entry.draftOriginal || entry.hasFinal);
+                  const canShowRawTranslation = isUsableDisplayTranslation(entry.draftTranslated);
                   const canShowAiTranslation = !!entry.translated && (!entry.draftTranslated || entry.translated !== entry.draftTranslated || entry.hasFinal);
                   const originalView: CardOriginalView = entry.originalView
-                    || (isWhisperProcessing && canShowRawOriginal ? 'raw' : canShowWhisperOriginal ? 'whisper' : 'raw');
+                    || ((isWhisperProcessing || whisperFailed) && canShowRawOriginal ? 'raw' : canShowWhisperOriginal ? 'whisper' : 'raw');
                   const translationView: CardTranslationView = entry.translationView
-                    || (originalView === 'raw' && canShowRawTranslation ? 'raw' : canShowAiTranslation ? 'ai' : canShowRawTranslation ? 'raw' : 'ai');
+                    || ((aiTranslationFailed || originalView === 'raw') && canShowRawTranslation ? 'raw' : canShowAiTranslation ? 'ai' : canShowRawTranslation ? 'raw' : 'ai');
                   const mainOriginal = originalView === 'raw'
                     ? (entry.draftOriginal || entry.original || '')
                     : (entry.original || entry.draftOriginal || '');
                   const mainTranslated = translationView === 'raw'
-                    ? (entry.draftTranslated || entry.translated || (entry.mode === 'dual' ? '等待翻譯' : undefined))
+                    ? (isUsableDisplayTranslation(entry.draftTranslated) ? entry.draftTranslated : (entry.mode === 'dual' ? '等待翻譯' : undefined))
                     : (entry.translated ?? (isProcessing ? entry.draftTranslated : undefined));
                   const setOriginalView = (view: CardOriginalView) => (e: React.MouseEvent) => {
                     e.stopPropagation();
@@ -3165,7 +3208,9 @@ export default function App() {
                       }}
                       className={cn(
                         "group/entry transition-all cursor-pointer rounded-xl shadow-sm overflow-hidden border",
-                        isProcessing
+                        hasFailure
+                          ? "border-rose-200 border-l-4 border-l-rose-500"
+                          : isProcessing
                           ? "border-amber-200 border-l-4 border-l-amber-400"
                           : hasDraftComparison
                             ? "border-indigo-200 border-l-4 border-l-indigo-500"
@@ -3175,7 +3220,7 @@ export default function App() {
                       {/* Card header: timestamp + status badge + actions */}
                       <div className={cn(
                         "flex items-center justify-between px-3 py-1.5 border-b",
-                        isProcessing ? "bg-amber-50/60 border-amber-100" : "bg-zinc-50/60 border-zinc-100"
+                        hasFailure ? "bg-rose-50/60 border-rose-100" : isProcessing ? "bg-amber-50/60 border-amber-100" : "bg-zinc-50/60 border-zinc-100"
                       )}>
                         <div className="flex items-center gap-2">
                           <span className="text-[10px] font-mono text-zinc-400">
@@ -3189,7 +3234,12 @@ export default function App() {
                           )}>{entry.deviceLabel || deviceLabelRef.current}</span>
                         </div>
                         <div className="flex items-center gap-1.5">
-                          {isProcessing ? (
+                          {hasFailure ? (
+                            <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 flex items-center gap-1 select-none">
+                              <span className="w-1.5 h-1.5 bg-rose-500 rounded-full inline-block" />
+                              {whisperFailed ? 'Whisper 失敗' : '翻譯失敗'}
+                            </span>
+                          ) : isProcessing ? (
                             <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 flex items-center gap-1 select-none">
                               <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse inline-block" />
                               {entry.status === 'translating'
@@ -3314,6 +3364,11 @@ export default function App() {
                               <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{mainTranslated}</p>
                               {!isProcessing && entry.translatedBy && (
                                 <span className="text-[9px] text-zinc-400 font-medium select-none">{entry.translatedBy}</span>
+                              )}
+                              {failureDetail && (
+                                <span className="block text-[10px] text-rose-600 font-semibold leading-snug select-text">
+                                  失敗原因：{failureDetail}
+                                </span>
                               )}
                               {isProcessing && (
                                 <span className="text-[9px] text-amber-500 font-medium select-none">

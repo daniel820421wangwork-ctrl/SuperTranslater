@@ -23,6 +23,7 @@ export type RoomSegment = {
   deviceLabel: string;
   ts: number;
   translatedBy?: string;
+  failureReason?: string;
 };
 
 let db: Database | null = null;
@@ -99,6 +100,7 @@ export const updateSegmentUnlessCompleted = async (roomId: string, key: string, 
           translated: fallback,
           status: 'completed',
           translatedBy: current.translatedBy || '瀏覽器初步翻譯',
+          failureReason: sanitized.failureReason,
         };
       }
     }
