@@ -298,9 +298,10 @@ const TRANS_FONT_SIZES = [
 // ===== In-browser Whisper (high-accuracy, accent-robust ASR) =====
 const WHISPER_MODEL = 'Xenova/whisper-base';        // ~145MB, good accent quality
 const WHISPER_SAMPLE_RATE = 16000;                  // Whisper expects 16kHz mono
+const MAX_WHISPER_SEGMENT_SECONDS = 12;
 
 // Combine captured Float32 frames into one buffer.
-const concatFloat32 = (chunks: Float32Array[]): Float32Array => {
+  const concatFloat32 = (chunks: Float32Array[]): Float32Array => {
   let total = 0;
   for (const c of chunks) total += c.length;
   const out = new Float32Array(total);
@@ -308,6 +309,9 @@ const concatFloat32 = (chunks: Float32Array[]): Float32Array => {
   for (const c of chunks) { out.set(c, off); off += c.length; }
   return out;
 };
+
+const totalFloat32Length = (chunks: Float32Array[]): number =>
+  chunks.reduce((sum, chunk) => sum + chunk.length, 0);
 
 // Linear-resample mic audio down to 16kHz mono for Whisper.
 const resampleTo16k = (input: Float32Array, inputRate: number): Float32Array => {
@@ -579,6 +583,7 @@ export default function App() {
   const whisperLoadingRef = useRef(false);
   const whisperDispatchQueueRef = useRef<Array<{ id: number; audio: Float32Array }>>([]);
   const whisperJobActiveRef = useRef(false);
+  const activeVadAudioRef = useRef<Float32Array[]>([]);
   const progressByFileRef = useRef<Record<string, { loaded: number; total: number }>>({});
   const vadRef = useRef<any>(null);
   const whisperJobRef = useRef(0);
@@ -1218,6 +1223,8 @@ export default function App() {
         const reason = msg.error || '未知錯誤';
         failPendingWhisperJobs(reason);
         addToast(`Whisper 載入失敗：${reason}`, 'error');
+      } else if (msg.type === 'debug') {
+        console.info('[whisper:worker]', msg);
       } else if (msg.type === 'result') {
         whisperJobActiveRef.current = false;
         whisperPendingJobsRef.current = Math.max(0, whisperPendingJobsRef.current - 1);
@@ -1231,6 +1238,13 @@ export default function App() {
           addToast(`Whisper 轉錄失敗：${msg.error}`, 'error');
         }
         const cleaned = cleanTranscript(msg.text || '');
+        console.info('[whisper:result]', {
+          id: msg.id,
+          audioSeconds: msg.audioSeconds,
+          rawTextPreview: String(msg.text || '').slice(0, 180),
+          cleanedPreview: cleaned.slice(0, 180),
+          hasError: !!msg.error,
+        });
         const job = clipJobsRef.current.get(msg.id);
         if (job) {
           clipJobsRef.current.delete(msg.id);
@@ -1455,7 +1469,9 @@ export default function App() {
   // VAD is the single segmentation source for all three recognition modes.
   const handleUtterance = useCallback(async (audio: Float32Array, capture: SpeechDraftCapture) => {
     const mode = recognitionModeRef.current;
-    vadSpeechActiveRef.current = false;
+    if (activeSpeechDraftRef.current.id === capture.id) {
+      vadSpeechActiveRef.current = false;
+    }
     if (!isUsableWhisperAudio(audio)) return;
     pendingSpeechDraftRef.current = capture;
     // Late Web Speech results can still update this detached capture, but a
@@ -1580,6 +1596,7 @@ export default function App() {
           autoGainControl: true,
         } as any,
         onSpeechStart: () => {
+          activeVadAudioRef.current = [];
           const capture: SpeechDraftCapture = {
             id: ++speechDraftIdRef.current,
             finalText: '',
@@ -1595,11 +1612,41 @@ export default function App() {
           setWhisperActivity('speech');
         },
         onSpeechRealStart: () => setWhisperActivity('speech'),
-        onVADMisfire: () => setWhisperActivity('listening'),
-        onSpeechEnd: (audio: Float32Array) => {
+        onFrameProcessed: (_probabilities: unknown, frame: Float32Array) => {
+          if (!vadSpeechActiveRef.current) return;
+          activeVadAudioRef.current.push(new Float32Array(frame));
+          if (totalFloat32Length(activeVadAudioRef.current) < WHISPER_SAMPLE_RATE * MAX_WHISPER_SEGMENT_SECONDS) return;
+
+          const audio = concatFloat32(activeVadAudioRef.current);
+          activeVadAudioRef.current = [];
           const capture = activeSpeechDraftRef.current;
           utteranceProcessingQueueRef.current = utteranceProcessingQueueRef.current
             .then(() => handleUtterance(audio, capture))
+            .catch((error) => console.error('utterance processing failed', error));
+
+          const nextCapture: SpeechDraftCapture = {
+            id: ++speechDraftIdRef.current,
+            finalText: '',
+            interimText: '',
+            updatedAt: Date.now(),
+          };
+          activeSpeechDraftRef.current = nextCapture;
+          vadSpeechActiveRef.current = true;
+          currentSegmentFinalTextRef.current = '';
+          setCurrentSegmentFinalText('');
+          lastInterimRef.current = '';
+          setInterimTranscript('');
+        },
+        onVADMisfire: () => {
+          activeVadAudioRef.current = [];
+          setWhisperActivity('listening');
+        },
+        onSpeechEnd: (audio: Float32Array) => {
+          const capture = activeSpeechDraftRef.current;
+          const accumulated = activeVadAudioRef.current.length ? concatFloat32(activeVadAudioRef.current) : audio;
+          activeVadAudioRef.current = [];
+          utteranceProcessingQueueRef.current = utteranceProcessingQueueRef.current
+            .then(() => handleUtterance(accumulated, capture))
             .catch((error) => console.error('utterance processing failed', error));
         },
       } as any);

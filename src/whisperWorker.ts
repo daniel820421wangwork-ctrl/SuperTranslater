@@ -39,15 +39,19 @@ self.onmessage = async (e: MessageEvent) => {
         return;
       }
       try {
+        const audioSeconds = typeof msg.audio?.length === 'number' ? msg.audio.length / 16000 : 0;
+        (self as any).postMessage({ type: 'debug', id: msg.id, message: 'whisper-transcribe-start', audioSeconds });
         const out = await transcriber(msg.audio, {
           language: msg.language || 'english',
           task: 'transcribe',
+          chunk_length_s: 20,
+          stride_length_s: 4,
           // Reduce repetition-loop hallucinations on short/quiet chunks.
           no_repeat_ngram_size: 3,
           temperature: 0,
         });
         const text = (Array.isArray(out) ? out[0]?.text : out?.text) || '';
-        (self as any).postMessage({ type: 'result', id: msg.id, text: String(text).trim() });
+        (self as any).postMessage({ type: 'result', id: msg.id, text: String(text).trim(), audioSeconds });
       } catch (err: any) {
         (self as any).postMessage({ type: 'result', id: msg.id, text: '', error: String(err?.message || err) });
       }
