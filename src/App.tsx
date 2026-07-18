@@ -3147,7 +3147,7 @@ export default function App() {
                     setHistory(prev => prev.map(h => h.id === entry.id ? { ...h, showingDraft: !h.showingDraft } : h));
                   };
                   const sourceButtonClass = (active: boolean) => cn(
-                    "px-2 py-0.5 rounded-md text-[9px] font-extrabold border transition-colors disabled:opacity-35 disabled:cursor-not-allowed",
+                    "px-3 py-1.5 min-w-[3.25rem] rounded-lg text-[11px] font-extrabold border transition-colors disabled:opacity-35 disabled:cursor-not-allowed",
                     active
                       ? "bg-indigo-600 border-indigo-600 text-white"
                       : "bg-white border-zinc-200 text-zinc-500 hover:border-indigo-200 hover:text-indigo-600"
