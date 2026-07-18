@@ -990,7 +990,19 @@ export default function App() {
       addToast(`?????${reason.slice(0, 120)}`, 'error');
       const errorMsg = `[?????${reason.slice(0, 180)}]`;
       if (id) {
-        setHistory(prev => prev.map(item => item.id === id ? { ...item, translated: errorMsg, failureReason: reason } : item));
+        setHistory(prev => prev.map(item => {
+          if (item.id !== id) return item;
+          const fallback = isUsableDisplayTranslation(item.translated)
+            ? item.translated
+            : isUsableDisplayTranslation(item.draftTranslated)
+              ? item.draftTranslated
+              : undefined;
+          return {
+            ...item,
+            translated: fallback || errorMsg,
+            failureReason: reason,
+          };
+        }));
       }
       return errorMsg;
     }
@@ -1028,7 +1040,11 @@ export default function App() {
           const reason = summarizeError(error);
           console.error('[translation:browser-segment-failed]', { segmentId, originalPreview: text.slice(0, 240), reason, rawError: error });
           setHistory(prev => prev.map(h => h.id === segmentId ? {
-            ...h, translated: `[瀏覽器翻譯失敗：${reason.slice(0, 160)}]`, failureReason: reason, status: 'failed', hasFinal: true,
+            ...h,
+            translated: isUsableDisplayTranslation(h.translated) ? h.translated : `[瀏覽器翻譯失敗：${reason.slice(0, 160)}]`,
+            failureReason: reason,
+            status: isUsableDisplayTranslation(h.translated) ? h.status : 'failed',
+            hasFinal: true,
           } : h));
         });
       return;
@@ -1149,20 +1165,29 @@ export default function App() {
         next.sort((a, b) => b.timestamp - a.timestamp);
         return next;
       }),
-      (key, seg) => setHistory(prev => prev.map(h => h.id === key ? {
-        ...h,
-        original: seg.original ?? h.original,
-        translated: seg.translated === null ? undefined : (seg.translated ?? h.translated),
-        translatedBy: seg.translatedBy ?? h.translatedBy,
-        failureReason: seg.failureReason ?? h.failureReason,
-        draftOriginal: seg.draftOriginal ?? h.draftOriginal,
-        draftTranslated: seg.draftTranslated ?? h.draftTranslated,
-        mode: seg.mode ?? h.mode,
-        status: seg.status ?? h.status,
-        hasFinal: seg.status
-          ? seg.status === 'completed' || seg.status === 'failed'
-          : h.hasFinal || !!seg.translated,
-      } : h)),
+      (key, seg) => setHistory(prev => prev.map(h => {
+        if (h.id !== key) return h;
+        const incomingTranslated = seg.translated === null ? undefined : (seg.translated ?? h.translated);
+        const shouldKeepLocalTranslation =
+          isTranslationFailureText(incomingTranslated)
+          && isUsableDisplayTranslation(h.translated);
+        return {
+          ...h,
+          original: seg.original ?? h.original,
+          translated: shouldKeepLocalTranslation ? h.translated : incomingTranslated,
+          translatedBy: shouldKeepLocalTranslation ? h.translatedBy : (seg.translatedBy ?? h.translatedBy),
+          failureReason: seg.failureReason ?? (isTranslationFailureText(incomingTranslated) ? incomingTranslated : h.failureReason),
+          draftOriginal: seg.draftOriginal ?? h.draftOriginal,
+          draftTranslated: seg.draftTranslated ?? h.draftTranslated,
+          mode: seg.mode ?? h.mode,
+          status: shouldKeepLocalTranslation ? h.status : (seg.status ?? h.status),
+          hasFinal: shouldKeepLocalTranslation
+            ? h.hasFinal
+            : seg.status
+              ? seg.status === 'completed' || seg.status === 'failed'
+              : h.hasFinal || !!seg.translated,
+        };
+      })),
     );
     const offMembers = subscribeMembers(id, setRoomMembers);
     const offConn = subscribeConnection(setRoomConnected);
