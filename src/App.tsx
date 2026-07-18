@@ -29,6 +29,9 @@ const IS_IOS = typeof navigator !== 'undefined' && (
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 );
 
+type CardOriginalView = 'raw' | 'whisper';
+type CardTranslationView = 'raw' | 'ai';
+
 // Encode 16kHz Float32 audio as base64 Int16 PCM (compact relay over RTDB).
 const float32ToBase64Pcm16 = (f32: Float32Array): string => {
   const buf = new ArrayBuffer(f32.length * 2);
@@ -445,6 +448,8 @@ export default function App() {
     draftTranslated?: string;  // Browser-translate of draftOriginal
     hasFinal: boolean;         // true once Whisper + configured translate are done
     showingDraft: boolean;     // user toggle: true = show draft, false = show final
+    originalView?: CardOriginalView;
+    translationView?: CardTranslationView;
   }[]>([]);
   const historyRef = useRef<typeof history>([]);
   useEffect(() => { historyRef.current = history; }, [history]);
@@ -3109,18 +3114,44 @@ export default function App() {
                 {history.map((entry) => {
                   const isEditing = editingId === entry.id;
                   const isProcessing = !entry.hasFinal;
-                  const hasDraftComparison = entry.hasFinal && !!entry.draftOriginal;
+                  const hasDraftComparison = !!entry.draftOriginal;
                   const isWhisperProcessing = entry.mode === 'dual' && entry.status === 'whisper-processing';
-                  const mainOriginal = isWhisperProcessing
+                  const canShowRawOriginal = !!entry.draftOriginal;
+                  const canShowWhisperOriginal = !!entry.original && (!entry.draftOriginal || entry.original !== entry.draftOriginal || entry.hasFinal);
+                  const canShowRawTranslation = !!entry.draftTranslated;
+                  const canShowAiTranslation = !!entry.translated && (!entry.draftTranslated || entry.translated !== entry.draftTranslated || entry.hasFinal);
+                  const originalView: CardOriginalView = entry.originalView
+                    || (isWhisperProcessing && canShowRawOriginal ? 'raw' : canShowWhisperOriginal ? 'whisper' : 'raw');
+                  const translationView: CardTranslationView = entry.translationView
+                    || (originalView === 'raw' && canShowRawTranslation ? 'raw' : canShowAiTranslation ? 'ai' : canShowRawTranslation ? 'raw' : 'ai');
+                  const mainOriginal = originalView === 'raw'
                     ? (entry.draftOriginal || entry.original || '')
                     : (entry.original || entry.draftOriginal || '');
-                  const mainTranslated = isWhisperProcessing
-                    ? (entry.draftTranslated || entry.translated || '等待翻譯')
+                  const mainTranslated = translationView === 'raw'
+                    ? (entry.draftTranslated || entry.translated || (entry.mode === 'dual' ? '等待翻譯' : undefined))
                     : (entry.translated ?? (isProcessing ? entry.draftTranslated : undefined));
+                  const setOriginalView = (view: CardOriginalView) => (e: React.MouseEvent) => {
+                    e.stopPropagation();
+                    setHistory(prev => prev.map(h => h.id === entry.id ? {
+                      ...h,
+                      originalView: view,
+                      translationView: view === 'raw' ? 'raw' : 'ai',
+                    } : h));
+                  };
+                  const setTranslationView = (view: CardTranslationView) => (e: React.MouseEvent) => {
+                    e.stopPropagation();
+                    setHistory(prev => prev.map(h => h.id === entry.id ? { ...h, translationView: view } : h));
+                  };
                   const toggleComparison = (e: React.MouseEvent) => {
                     e.stopPropagation();
                     setHistory(prev => prev.map(h => h.id === entry.id ? { ...h, showingDraft: !h.showingDraft } : h));
                   };
+                  const sourceButtonClass = (active: boolean) => cn(
+                    "px-2 py-0.5 rounded-md text-[9px] font-extrabold border transition-colors disabled:opacity-35 disabled:cursor-not-allowed",
+                    active
+                      ? "bg-indigo-600 border-indigo-600 text-white"
+                      : "bg-white border-zinc-200 text-zinc-500 hover:border-indigo-200 hover:text-indigo-600"
+                  );
                   return (
                     <motion.div
                       key={entry.id}
@@ -3197,9 +3228,31 @@ export default function App() {
                       <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-zinc-100">
                         {/* English column */}
                         <div className="p-2.5 md:p-3 space-y-1.5">
-                          <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-widest select-none">
-                            English{hasDraftComparison ? ' · Whisper' : ''}
-                          </p>
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-widest select-none">
+                              English
+                            </p>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={setOriginalView('raw')}
+                                disabled={!canShowRawOriginal}
+                                className={sourceButtonClass(originalView === 'raw')}
+                                title="顯示原始即時辨識文字，並同步顯示原始翻譯"
+                              >
+                                原始
+                              </button>
+                              <button
+                                type="button"
+                                onClick={setOriginalView('whisper')}
+                                disabled={!canShowWhisperOriginal}
+                                className={sourceButtonClass(originalView === 'whisper')}
+                                title="顯示 Whisper 校正文字，並同步顯示 AI 翻譯"
+                              >
+                                Whisper
+                              </button>
+                            </div>
+                          </div>
                           {isEditing ? (
                             <div className="space-y-1.5">
                               <textarea
@@ -3233,7 +3286,29 @@ export default function App() {
 
                         {/* Translation column */}
                         <div className="p-2.5 md:p-3 space-y-1.5">
-                          <p className="text-[9px] font-bold text-indigo-600 uppercase tracking-widest select-none">Translation (TW)</p>
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-[9px] font-bold text-indigo-600 uppercase tracking-widest select-none">Translation (TW)</p>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={setTranslationView('raw')}
+                                disabled={!canShowRawTranslation}
+                                className={sourceButtonClass(translationView === 'raw')}
+                                title="顯示原始即時草稿的初步翻譯"
+                              >
+                                原始
+                              </button>
+                              <button
+                                type="button"
+                                onClick={setTranslationView('ai')}
+                                disabled={!canShowAiTranslation}
+                                className={sourceButtonClass(translationView === 'ai')}
+                                title="顯示 AI 最終翻譯"
+                              >
+                                AI
+                              </button>
+                            </div>
+                          </div>
                           {mainTranslated ? (
                             <div className="space-y-1">
                               <p style={{ fontSize: transFontPx }} className="text-zinc-900 leading-relaxed font-bold">{mainTranslated}</p>
@@ -3266,7 +3341,7 @@ export default function App() {
                       </div>
 
                       {/* Draft comparison expandable section */}
-                      {hasDraftComparison && (
+                      {false && hasDraftComparison && (
                         <>
                           <button
                             onClick={toggleComparison}
